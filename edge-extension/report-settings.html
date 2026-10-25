@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>空调插件 · 错误报告</title>
+<link rel="stylesheet" href="report-settings.css">
+<main>
+  <h1>错误报告</h1>
+  <p>选择 <code>D:\Agent\AirCon\error-reports</code> 文件夹并允许写入。之后出错时会自动保存，设置页可以关闭。</p>
+  <button id="choose" type="button">选择报告目录</button>
+  <button id="retry" type="button">重试保存</button>
+  <p id="status" role="status">正在读取保存状态…</p>
+  <p id="error" role="alert"></p>
+  <p class="note">目录权限失效时，请重新选择同一文件夹。插件内部保留最近 20 份报告；已保存的文件不会自动删除。报告不含登录令牌、账号资料或原始响应正文。</p>
+  <p class="note">保存报告不会改变循环停止规则，也不会额外开关空调。</p>
+  <p class="note">自动诊断持续保留有限的学校接口与生命周期记录，无需手动抓取网络日志。新增的 webRequest 权限仅用于观察学校请求，不拦截或修改流量。</p>
+</main>
+<script type="module" src="report-settings.js"></script>
+</html>

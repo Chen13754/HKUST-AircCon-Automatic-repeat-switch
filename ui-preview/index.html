@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自动循环 · 1.1.17 本地预览</title>
+  <link rel="stylesheet" href="/preview.css">
+  <link rel="stylesheet" href="/content.css">
+  <script defer src="/preview.js"></script>
+  <script defer src="/report-format.js"></script>
+  <script defer src="/content.js"></script>
+</head>
+<body>
+  <header class="preview-tools">
+    <h1>自动循环 <span>1.1.17</span></h1>
+    <p>本地模拟预览 · 不连接学校，不操作空调</p>
+    <div class="preview-controls">
+      <label>情景 <select id="scenario">
+        <option value="idle">未运行</option><option value="on">开机阶段</option><option value="off">关机阶段</option>
+        <option value="busy">正在操作</option><option value="unknown">结果未知</option><option value="error">HTTP 502 错误</option>
+        <option value="warning">保活警告</option><option value="elsewhere">其他页面运行</option>
+        <option value="recovering">页面恢复中</option><option value="interrupted">上次循环中断</option><option value="command-unknown">中断时开关待确认</option>
+        <option value="query-recovering">查询超时恢复中</option>
+        <option value="blocked">清理失败（禁止控制）</option>
+      </select></label>
+      <label>面板宽度 <select id="width"><option>260</option><option selected>360</option><option>480</option></select></label>
+      <label>应用耗时 <select id="apply-delay"><option value="1000">1 秒</option><option value="5000">5 秒</option><option value="0">立即</option></select></label>
+      <label>内容缩放 <select id="zoom"><option value="1">100%</option><option value="2">200%</option></select></label>
+      <label>报告状态 <select id="reports">
+        <option value="ready">已就绪</option><option value="loading">读取中</option><option value="saving">保存中</option>
+        <option value="permission">未授权</option><option value="cached">待保存 2 份</option>
+        <option value="directory-error">目录不可用</option><option value="write-error">写入失败</option><option value="storage-error">缓存不可用</option>
+      </select></label>
+    </div>
+    <details><summary>模拟通信记录</summary><pre id="calls"></pre><p id="settings-result"></p></details>
+  </header>
+  <main id="stage">
+    <article class="ui segment school-card">
+      <small>Air Conditioning Status</small>
+      <div class="native-status">OFF</div>
+      <div class="native-control">Switch off</div>
+      <div class="native-topup">＋&nbsp; Top Up</div>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "HKUST AC Cycle",
+  "version": "1.1.17",
+  "description": "Cycle the HKUST student air conditioner while its control page remains open.",
+  "permissions": ["alarms", "storage", "webRequest", "webNavigation"],
+  "host_permissions": ["https://w5.ab.ust.hk/*", "https://cas.ust.hk/*"],
+  "options_ui": { "page": "report-settings.html", "open_in_tab": true },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "js": ["report-format.js", "page-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "js": ["page-observer.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "js": ["report-format.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

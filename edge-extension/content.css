@@ -1,0 +1,121 @@
+#hkust-ac-cycle-panel {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #e0e4e8;
+  border-radius: 12px;
+  background: #fff;
+  color: #182b3c;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  text-align: left;
+}
+
+#hkust-ac-cycle-panel *,
+#hkust-ac-cycle-panel *::before,
+#hkust-ac-cycle-panel *::after { box-sizing: border-box; }
+#hkust-ac-cycle-panel [hidden] { display: none !important; }
+
+#hkust-ac-cycle-panel .ac-cycle-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #edf0f2;
+}
+#hkust-ac-cycle-panel h4 {
+  margin: 0;
+  color: #182b3c;
+  font: 600 18px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  white-space: nowrap;
+}
+#hkust-ac-cycle-panel .ac-cycle-badge {
+  padding: 3px 7px;
+  border-radius: 7px;
+  background: #f0f2f4;
+  color: #596571;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#hkust-ac-cycle-panel .ac-cycle-badge[data-state="on"],
+#hkust-ac-cycle-panel .ac-cycle-badge[data-state="off"] { color: #205181; background: #edf4fa; }
+#hkust-ac-cycle-panel .ac-cycle-badge[data-state="unknown"],
+#hkust-ac-cycle-panel .ac-cycle-badge[data-state="recovering"] { color: #8a4300; background: #fff3df; }
+#hkust-ac-cycle-panel .ac-cycle-badge[data-state="interrupted"] { color: #963431; background: #fff0ee; }
+#hkust-ac-cycle-panel button { margin: 0; font: inherit; cursor: pointer; touch-action: manipulation; }
+#hkust-ac-cycle-panel .ac-cycle-help-toggle {
+  margin-left: auto;
+  padding: 4px 0 4px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #205181;
+  white-space: nowrap;
+}
+#hkust-ac-cycle-panel .ac-cycle-help-toggle[aria-expanded="true"] { text-decoration: underline; text-underline-offset: 4px; }
+
+#hkust-ac-cycle-panel .ac-cycle-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+#hkust-ac-cycle-panel .ac-cycle-field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: #596571; }
+#hkust-ac-cycle-panel .ac-cycle-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 44px;
+  padding: 0 7px;
+  border: 1px solid #cbd2d9;
+  border-radius: 9px;
+  background: #fff;
+}
+#hkust-ac-cycle-panel input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #182b3c;
+  font: 500 20px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-variant-numeric: tabular-nums;
+  appearance: auto;
+}
+#hkust-ac-cycle-panel input::-webkit-inner-spin-button,
+#hkust-ac-cycle-panel input::-webkit-outer-spin-button { margin: 0; opacity: 1; }
+#hkust-ac-cycle-panel .ac-cycle-unit { flex-shrink: 0; font-size: 12px; }
+#hkust-ac-cycle-panel .ac-cycle-input:has(input:disabled) { background: #f7f8fa; }
+#hkust-ac-cycle-panel input:disabled { color: #596571; opacity: 1; -webkit-text-fill-color: #596571; }
+#hkust-ac-cycle-panel .ac-cycle-actions { display: flex; gap: 10px; margin-top: 16px; }
+#hkust-ac-cycle-panel .ac-cycle-actions button {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 8px;
+  border: 1px solid #205181;
+  border-radius: 9px;
+  background: #fff;
+  color: #205181;
+  font-weight: 600;
+}
+#hkust-ac-cycle-panel .ac-cycle-actions .ac-cycle-start,
+#hkust-ac-cycle-panel .ac-cycle-actions .ac-cycle-update { background: #205181; color: #fff; }
+#hkust-ac-cycle-panel .ac-cycle-actions button:hover:enabled { background: #f0f5fa; }
+#hkust-ac-cycle-panel .ac-cycle-actions .ac-cycle-start:hover:enabled,
+#hkust-ac-cycle-panel .ac-cycle-actions .ac-cycle-update:hover:enabled { background: #19456f; }
+#hkust-ac-cycle-panel .ac-cycle-timing-hint { margin: 10px 0 0; color: #8a5a00; font-size: 12px; overflow-wrap: anywhere; }
+#hkust-ac-cycle-panel button:disabled { opacity: .45; cursor: not-allowed; }
+#hkust-ac-cycle-panel button:focus-visible,
+#hkust-ac-cycle-panel .ac-cycle-input:has(input:focus-visible) { outline: 2px solid #3879b6; outline-offset: 3px; }
+#hkust-ac-cycle-panel input:focus-visible { outline: none; }
+
+#hkust-ac-cycle-panel .ac-cycle-status { margin: 12px 0 0; font-weight: 500; color: #205181; font-variant-numeric: tabular-nums; }
+#hkust-ac-cycle-panel .ac-cycle-message { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+#hkust-ac-cycle-panel .ac-cycle-message:empty { display: none; }
+#hkust-ac-cycle-panel .ac-cycle-message[data-kind="error"] { color: #a4262c; }
+#hkust-ac-cycle-panel .ac-cycle-message[data-kind="warning"] { color: #8a5a00; }
+#hkust-ac-cycle-panel .ac-cycle-help { margin-top: 16px; padding-top: 14px; border-top: 1px solid #edf0f2; }
+#hkust-ac-cycle-panel .ac-cycle-warning { margin: 0; color: #596571; line-height: 1.65; }
+#hkust-ac-cycle-panel .ac-cycle-report-settings,
+#hkust-ac-cycle-panel .ac-cycle-report-action { padding: 3px 0; border: 0; border-radius: 3px; background: transparent; color: #205181; text-decoration: underline; text-underline-offset: 3px; }
+#hkust-ac-cycle-panel .ac-cycle-report-settings { margin-top: 10px; }
+#hkust-ac-cycle-panel .ac-cycle-report-status { margin: 5px 0 0; color: #596571; font-size: 12px; overflow-wrap: anywhere; }
+#hkust-ac-cycle-panel .ac-cycle-report-notice { margin-top: 12px; padding-top: 10px; border-top: 1px solid #edf0f2; color: #8a5a00; font-size: 12px; }
+#hkust-ac-cycle-panel .ac-cycle-report-action { display: block; }

@@ -1,0 +1,11 @@
+body { margin: 0; background: #f5faff; color: #183b58; font: 15px/1.65 system-ui, sans-serif; }
+main { max-width: 680px; margin: 40px auto; padding: 24px; background: white; border: 1px solid #c7d9e8; border-radius: 10px; }
+h1 { margin-top: 0; font-size: 24px; }
+code { overflow-wrap: anywhere; }
+button { padding: 9px 14px; margin: 0 8px 8px 0; border: 1px solid #205181; border-radius: 6px; background: #205181; color: white; cursor: pointer; }
+button:disabled { opacity: .5; cursor: wait; }
+#status, #error { overflow-wrap: anywhere; }
+#status { white-space: pre-line; }
+#error { color: #a4262c; }
+.note { color: #5a6470; font-size: 13px; }
+@media (max-width: 760px) { main { margin: 12px; padding: 18px; } }

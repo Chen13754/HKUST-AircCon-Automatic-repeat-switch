@@ -1,0 +1,22 @@
+# Local incident data, school snapshots and historical backups
+/.backups/
+/error-reports/
+/Web1021/
+/HKUST - Smart Power Meter Infrastructure Student Panel.html
+/HKUST - Smart Power Meter Infrastructure Student Panel_files/
+/网址.txt
+
+# Generated local verification artifacts
+/test-results*.txt
+/ui-preview/qa/
+
+# Local environments and private configuration
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+/.codex/
+/.aws/

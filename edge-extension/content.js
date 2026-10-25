@@ -115,7 +115,7 @@
           phase: view.run?.phase, phaseStartedAt: view.run?.phaseStartedAt, previousNextAt: view.run?.nextAt, outcome: "unknown" } : undefined,
         diagnostics: { coverage: { journal: "unavailable" }, site: pageEvidence(), events: pageEvents, network: pageResources },
         communication: { messageType, reason: error.communicationReason, tabIsHome: isHome() }
-      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.17", userAgent: globalThis.navigator?.userAgent });
+      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.18", userAgent: globalThis.navigator?.userAgent });
       chrome.storage.local.set({ [format.fallbackKey(report.reportId)]: { report, saved: false } }).then(async () => {
         reportStatus = { phase: "cached", pending: 1 };
         render();

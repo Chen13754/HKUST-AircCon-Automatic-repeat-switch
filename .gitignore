@@ -9,6 +9,7 @@
 # Generated local verification artifacts
 /test-results*.txt
 /ui-preview/qa/
+/dist/
 
 # Local environments and private configuration
 node_modules/

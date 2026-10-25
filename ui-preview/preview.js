@@ -11,7 +11,7 @@ const run = phase => ({ id: `preview-${++runNumber}`, phase, expectedOn: phase =
   startedAt: Date.now() - 420000, phaseStartedAt: Date.now() - 420000, timingRevision: 0, nextAt: Date.now() + 180000 });
 window.chrome = {
   runtime: {
-    getManifest: () => ({ version: "1.1.17" }),
+    getManifest: () => ({ version: "1.1.18" }),
     onMessage: { addListener: listener => listeners.push(listener) },
     async sendMessage(message) {
       calls.push(message.type);

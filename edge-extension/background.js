@@ -9,7 +9,7 @@ import { Diagnostics } from "./diagnostics.js";
 const HOME_PATH = "/njggt/app/home";
 const pageMessageTypes = new Set(["aircon:initialize", "aircon:getState", "aircon:start", "aircon:updateDurations", "aircon:stop", "aircon:manualCheck", "aircon:openReportSettings"]);
 const reportTabs = new Set();
-const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.17", userAgent: globalThis.navigator?.userAgent };
+const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.18", userAgent: globalThis.navigator?.userAgent };
 const reporter = new ErrorReporter({
   storage: chrome.storage.local,
   environment,

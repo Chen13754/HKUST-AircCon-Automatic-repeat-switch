@@ -6,7 +6,8 @@
 <link rel="stylesheet" href="report-settings.css">
 <main>
   <h1>错误报告</h1>
-  <p>选择 <code>D:\Agent\AirCon\error-reports</code> 文件夹并允许写入。之后出错时会自动保存，设置页可以关闭。</p>
+  <p>选择你自己的本地报告文件夹并允许写入，例如“文档”中的 <code>HKUST-AC-reports</code>。之后出错时会自动保存，设置页可以关闭。</p>
+  <p class="note">报告目录由你决定，无需使用固定路径。未授权时报告先保存在插件缓存中，不影响正常启动；插件不会自动上传报告。</p>
   <button id="choose" type="button">选择报告目录</button>
   <button id="retry" type="button">重试保存</button>
   <p id="status" role="status">正在读取保存状态…</p>

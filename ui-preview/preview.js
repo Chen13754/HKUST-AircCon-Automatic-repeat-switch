@@ -11,7 +11,7 @@ const run = phase => ({ id: `preview-${++runNumber}`, phase, expectedOn: phase =
   startedAt: Date.now() - 420000, phaseStartedAt: Date.now() - 420000, timingRevision: 0, nextAt: Date.now() + 180000 });
 window.chrome = {
   runtime: {
-    getManifest: () => ({ version: "1.1.18" }),
+    getManifest: () => ({ version: "1.1.19" }),
     onMessage: { addListener: listener => listeners.push(listener) },
     async sendMessage(message) {
       calls.push(message.type);
@@ -64,11 +64,12 @@ document.getElementById("scenario").addEventListener("change", async event => {
     for (let i = 0; i < 12; i++) await Promise.resolve();
   }
   scenario = event.target.value;
-  view.run = ["on", "off", "warning", "recovering", "query-recovering", "blocked"].includes(scenario) ? run(scenario === "off" ? "off" : "on") : null;
+  view.run = ["on", "off", "warning", "recovering", "query-recovering", "http-recovering", "blocked"].includes(scenario) ? run(scenario === "off" ? "off" : "on") : null;
   view.blocked = scenario === "blocked";
   if (scenario === "recovering") view.run.recovery = { deadline: Date.now() + 60000 };
-  if (scenario === "query-recovering") {
-    view.run.queryRecovery = { id: "preview-incident", deadline: Date.now() + 44000 };
+  if (["query-recovering", "http-recovering"].includes(scenario)) {
+    view.run.queryRecovery = { id: "preview-incident", deadline: Date.now() + 44000,
+      initialFailure: scenario === "http-recovering" ? { errorCode: "E_HTTP", httpStatus: 502 } : { errorCode: "E_API_TIMEOUT" } };
     view.run.recovery = { kind: "query", deadline: view.run.queryRecovery.deadline, nextAttemptAt: Date.now() + 30000 };
   }
   view.elsewhere = scenario === "elsewhere";

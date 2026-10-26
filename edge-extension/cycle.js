@@ -166,13 +166,24 @@ export class CycleController {
     return globalThis.AirconReportFormat.queryRecovery({ ...recovery, rounds, outcome, endedAt: outcome === "waiting" ? null : this.clock() });
   }
 
+  queryRecoveryError(run, message) {
+    const recovery = run.queryRecovery;
+    return new CycleError(recovery?.initialFailure?.errorCode ?? recovery?.rounds?.[0]?.errorCode ?? "E_INTERNAL", message);
+  }
+
   async beginQueryRecovery(run, error, signal, context) {
-    if (error.code !== "E_API_TIMEOUT" || context.command?.sent || signal.aborted) return false;
+    const request = context.requests.find(item => item.sequence === error.requestSequence && item.errorCode === error.code);
+    const transientHttp = error.code === "E_HTTP" && request?.method === "GET"
+      && ["/app/prepaid/ac-timer", "/app/prepaid/ac-status"].includes(request.path)
+      && [502, 503, 504].includes(request.httpStatus);
+    if ((error.code !== "E_API_TIMEOUT" && !transientHttp) || context.command?.sent || signal.aborted) return false;
     const nextAttemptAt = this.clock() + QUERY_RETRY_DELAY_MS, deadline = run.nextAt + LATE_LIMIT_MS;
     if (nextAttemptAt >= deadline) return false;
     context.error = error;
     const recovery = this.querySnapshot({ id: globalThis.AirconReportFormat.newId(), initialOperationId: context.reportId,
-      startedAt: this.clock(), originalNextAt: run.nextAt, deadline, rounds: [] }, context);
+      startedAt: this.clock(), originalNextAt: run.nextAt, deadline,
+      initialFailure: { errorCode: error.code, httpStatus: request?.httpStatus, path: request?.path, sequence: request?.sequence },
+      rounds: [] }, context);
     recovery.nextAttemptAt = nextAttemptAt;
     run = { ...run, queryRecovery: recovery, recovery: { kind: "query", at: recovery.startedAt, deadline, nextAttemptAt } };
     context.run = run;
@@ -205,7 +216,7 @@ export class CycleController {
       await this.advancePhase(run, signal, context);
       const result = this.querySnapshot(run.queryRecovery, context, "recovered");
       try { this.report({ ...context, at: this.clock(), source: "queryRecovery", recovered: true,
-        queryRecovery: result, error: new CycleError("E_API_TIMEOUT", "查询超时后已恢复。") }); } catch { /* Diagnostic only. */ }
+        queryRecovery: result, error: this.queryRecoveryError(run, "查询异常后已恢复。") }); } catch { /* Diagnostic only. */ }
     } catch (error) {
       context.error = error;
       // This window admits at most one delayed round; it is never extended.
@@ -799,7 +810,7 @@ export class CycleController {
         originalOperationId: prior?.reportId });
       context.queryRecovery = this.querySnapshot(run.queryRecovery, prior ?? context,
         kind === "info" || prior?.error?.code === "E_CANCELLED" ? "cancelled" : "stopped");
-      this.recordError(new CycleError("E_API_TIMEOUT", "查询恢复已结束。"), context, run);
+      this.recordError(this.queryRecoveryError(run, "查询恢复已结束。"), context, run);
     }
     const notice = { tabId: run.tabId, text, kind, at: this.clock(), outcomeUnknown: Boolean(context?.command?.sent && !context.command.confirmed) };
     const cancellation = NON_FAULT_CODES.has(context?.error?.code) && !notice.outcomeUnknown;

@@ -192,6 +192,9 @@
     const operationId = identifier(draft.originalOperationId ?? draft.reportId);
     const matches = request && operationId ? clean.network.filter(item => item.operationId === operationId && item.sequence === request.sequence) : [];
     const network = matches.length === 1 ? matches[0] : null;
+    const evidenceNetwork = network?.correlation === "unique" ? network : null;
+    const responseHeadersAt = evidenceNetwork?.events?.find(item => item.event === "headersReceived")?.at ?? null;
+    const browserCompletedAt = evidenceNetwork?.events?.find(item => item.event === "completed")?.at ?? null;
     const local = operationId ? clean.events.filter(item => item.operationId === operationId && item.code === errorCode && item.outcome === "error").at(-1) : null;
     const phase = requestPhases.has(request?.phase) ? request.phase : null;
     return {
@@ -199,6 +202,8 @@
       requestSequence: positive(request?.sequence), browserRequestId: network?.id ?? null, component: pick(local?.component, ["store", "history", "alarm", "recovery", "keepalive", "page"]),
       step: pick(local?.step, steps), browserStage: network?.events?.filter(item => !["completed", "error"].includes(item.event)).at(-1)?.event ?? null,
       correlation: network?.correlation ?? null,
+      browserHttpStatus: evidenceNetwork?.httpStatus ?? null, responseHeadersAt, browserCompletedAt,
+      responseHeadersAfterCancellationMs: responseHeadersAt !== null && time(request?.cancelledAt) !== null ? responseHeadersAt - request.cancelledAt : null,
       browserError: networkRecord({ error: network?.error }).error,
       cancellation: request?.cancelledBy ? cleanCode(request.cancelledBy) : errorCode === "E_API_TIMEOUT" ? "E_API_TIMEOUT" : null,
       cancelledAt: time(request?.cancelledAt), cancellationOrigin: pick(request?.cancellationOrigin, ["request-timeout", "parent"]),
@@ -276,6 +281,11 @@
   function queryRecovery(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     return { id: identifier(value.id), initialOperationId: identifier(value.initialOperationId),
+      initialFailure: value.initialFailure && typeof value.initialFailure === "object" ? {
+        errorCode: value.initialFailure.errorCode == null ? null : cleanCode(value.initialFailure.errorCode),
+        httpStatus: Number.isInteger(value.initialFailure.httpStatus) && value.initialFailure.httpStatus >= 100 && value.initialFailure.httpStatus <= 599 ? value.initialFailure.httpStatus : null, path: paths.has(value.initialFailure.path) ? value.initialFailure.path : null,
+        sequence: positive(value.initialFailure.sequence)
+      } : null,
       startedAt: time(value.startedAt), originalNextAt: time(value.originalNextAt), deadline: time(value.deadline),
       nextAttemptAt: time(value.nextAttemptAt), endedAt: time(value.endedAt), outcome: pick(value.outcome, ["waiting", "recovered", "cancelled", "stopped"]),
       rounds: (Array.isArray(value.rounds) ? value.rounds : []).slice(-4).map(item => ({

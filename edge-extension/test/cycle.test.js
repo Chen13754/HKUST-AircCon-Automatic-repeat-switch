@@ -82,7 +82,7 @@ for (const source of ["start", "tick", "initialize", "manualCheck", "keepAlive",
     let actual = h.status, timedOut = false, finish;
     const calls = [];
     const before = h.run ? { ...h.run } : null;
-    h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10,
+    h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
       fetchImpl: async (url, opts) => {
         const path = url.split("/").at(-1);
         calls.push([path, opts.method]);
@@ -123,10 +123,10 @@ for (const failedPath of ["ac-timer", "ac-status"]) {
     await h.controller.start(8, 2, 4); h.advance(120_000);
     let finish, transport;
     const calls = [];
-    h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 1000,
+    h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 1000, switchRequestTimeoutMs: 1000,
       fetchImpl: async (url, opts) => {
         calls.push(url);
-        if (url.endsWith(failedPath)) return { ok: false, status: failedPath === "ac-timer" ? 503 : 401 };
+        if (url.endsWith(failedPath)) return { ok: false, status: failedPath === "ac-timer" ? 500 : 401 };
         transport = opts.signal;
         return new Promise(resolve => { finish = resolve; });
       }
@@ -150,7 +150,7 @@ test("both preflight queries time out at most twice and schedule recovery with f
   const reports = [], calls = [], finishes = [];
   const h = harness({ report: draft => { reports.push(globalThis.AirconReportFormat.makeReport(draft)); return draft.reportId; } });
   await h.controller.start(8, 2, 4); h.advance(120_000);
-  h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10,
+  h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async (url, opts) => { calls.push([url, opts.signal]); return new Promise(resolve => { finishes.push(resolve); }); }
   });
   await h.controller.tick("run-1");
@@ -176,7 +176,7 @@ test("stop aborts a retry response body and its late completion cannot resume sw
   await h.controller.start(8, 2, 4); h.advance(120_000);
   let timerCalls = 0, entered, finishBody, context, transport;
   const retrying = new Promise(resolve => { entered = resolve; });
-  h.controller.api = createSchoolApi({ getToken: async (_tab, signal) => { context = signal.diagnostic; return "token"; }, requestTimeoutMs: 10,
+  h.controller.api = createSchoolApi({ getToken: async (_tab, signal) => { context = signal.diagnostic; return "token"; }, requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async (url, opts) => {
       if (url.endsWith("ac-status")) return schoolReply({ ac_status: { DisconnectRelay: true } });
       if (++timerCalls === 1) return new Promise(() => {});
@@ -205,7 +205,7 @@ test("a successful parallel status read remains the latest observation when the 
   const reports = [];
   const h = harness({ report: draft => { reports.push(globalThis.AirconReportFormat.makeReport(draft)); return draft.reportId; } });
   await h.controller.start(8, 2, 4); h.advance(120_000);
-  h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10,
+  h.controller.api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async url => url.endsWith("ac-timer") ? new Promise(() => {}) : schoolReply({ ac_status: { DisconnectRelay: false } })
   });
   await h.controller.tick("run-1");
@@ -222,7 +222,7 @@ for (const action of ["stop", "suspend", "abandon", "deadline"]) {
     if (action === "deadline") h.controller.operationTimeoutMs = 100;
     let entered, finishToken, context, tokens = 0;
     const retrying = new Promise(resolve => { entered = resolve; });
-    h.controller.api = createSchoolApi({ requestTimeoutMs: 10,
+    h.controller.api = createSchoolApi({ requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
       getToken: (_tab, signal) => {
         context = signal.diagnostic;
         if (++tokens !== 3) return "token";
@@ -626,7 +626,7 @@ test("real request timeout aborts heartbeat I/O while retaining the control loop
   await h.controller.start(8, 240, 1);
   let requestSignal;
   h.controller.api = createSchoolApi({
-    getToken: async () => "test-token", requestTimeoutMs: 10,
+    getToken: async () => "test-token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async (_url, options) => { requestSignal = options.signal; return new Promise(() => {}); }
   });
   await h.controller.keepAlive("run-1");
@@ -810,7 +810,7 @@ test("502 snapshot captures the old cycle and actual last observation before cle
 test("start POST timeout preserves requested settings and distinguishes sent from confirmed", async () => {
   const reports = [];
   const h = harness({ report: value => { reports.push(globalThis.AirconReportFormat.makeReport(value)); return value.reportId; } });
-  h.controller.api = createSchoolApi({ getToken: async () => "secret", requestTimeoutMs: 10,
+  h.controller.api = createSchoolApi({ getToken: async () => "secret", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async (url, options) => options.method === "POST" ? new Promise(() => {}) : {
       ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data: url.endsWith("ac-status") ? { ac_status: { DisconnectRelay: false } } : {} })
     }
@@ -870,7 +870,7 @@ for (const bodyHangs of [false, true]) {
     let transport;
     const calls = [];
     const late = new Promise(resolve => { finish = resolve; });
-    h.controller.api = createSchoolApi({ getToken: async () => "SECRET_TOKEN", requestTimeoutMs: 10,
+    h.controller.api = createSchoolApi({ getToken: async () => "SECRET_TOKEN", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
       fetchImpl: async (_url, options) => {
         calls.push(options.method);
         transport = options.signal;
@@ -910,3 +910,59 @@ for (const bodyHangs of [false, true]) {
     assert.equal(before.includes("SECRET_TOKEN"), false);
   });
 }
+
+for (const source of ["start", "manualCheck", "keepAlive", "updateDurations"]) test(`${source} HTTP 502 does not enter automatic tick recovery`, async () => {
+  const reports = [];
+  const h = harness({ report: draft => { reports.push(draft); return draft.reportId; } });
+  if (source !== "start") await h.controller.start(8, 2, 4);
+  let calls = 0;
+  h.controller.api = createSchoolApi({ getToken: async () => "mock", fetchImpl: async () => { calls++; return { ok: false, status: 502 }; } });
+  if (source === "start") await assert.rejects(h.controller.start(8, 2, 4), { code: "E_HTTP" });
+  else if (source === "manualCheck") await h.controller.manualCheck(8);
+  else if (source === "keepAlive") await h.controller.keepAlive("run-1");
+  else {
+    h.advance(90000);
+    await assert.rejects(h.controller.updateDurations(8, { runId: h.run.id, timingRevision: h.run.timingRevision, onMinutes: 1, offMinutes: 4 }), { code: "E_HTTP" });
+  }
+  assert.equal(h.run?.queryRecovery ?? null, null);
+  assert.ok(reports.every(report => !report.queryRecovery));
+  assert.ok(calls > 0 && calls <= 2);
+});
+
+test("30s operation budget aborts a 15s POST after slow preflight without resend", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000000 });
+  const h = harness({ clock: () => Date.now() }); await h.controller.start(8, 2, 4);
+  t.mock.timers.tick(120000);
+  const reads = new Map(); let postCalls = 0, postSignal, finishPost;
+  h.controller.api = createSchoolApi({ getToken: async () => "mock", performanceImpl: { now: () => Date.now() }, fetchImpl: async (url, options) => {
+    if (options.method === "POST") {
+      postCalls++; postSignal = options.signal; return new Promise(resolve => { finishPost = resolve; });
+    }
+    const path = url.split("/").at(-1), attempt = (reads.get(path)?.attempt ?? 0) + 1;
+    return new Promise(resolve => reads.set(path, { attempt, resolve }));
+  } });
+  const task = h.controller.tick(h.run.id, h.run.nextAt);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(8000); await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(7900);
+  for (const { attempt, resolve } of reads.values()) { assert.equal(attempt, 2); resolve(schoolReply({ ac_status: { DisconnectRelay: true } })); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(postCalls, 1);
+  t.mock.timers.tick(14100); await task;
+  assert.equal(postSignal.aborted, true); assert.equal(h.run, null);
+  assert.equal(h.notice.outcomeUnknown, true); assert.match(h.notice.text, /E_OPERATION_TIMEOUT/);
+  finishPost(schoolReply({ ac_toggle: { Message: "Execution succeeded" } }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(postCalls, 1); assert.equal(h.run, null);
+});
+
+test("POST HTTP 502 is unknown and never enters preflight recovery", async () => {
+  const h = harness(); await h.controller.start(8, 2, 4); h.advance(120000);
+  let posts = 0;
+  h.controller.api = createSchoolApi({ getToken: async () => "mock", fetchImpl: async (_url, options) => {
+    if (options.method === "POST") { posts++; return { ok: false, status: 502 }; }
+    return schoolReply({ ac_status: { DisconnectRelay: true } });
+  } });
+  await h.controller.tick("run-1");
+  assert.equal(h.run, null); assert.equal(posts, 1); assert.equal(h.notice.outcomeUnknown, true);
+});

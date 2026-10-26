@@ -672,3 +672,52 @@ test("a backend commit during a stale cache snapshot still wins fallback import"
   assert.equal(h.writes.length, 1);
   assert.equal(h.writes[0].report.error.code, "E_HTTP");
 });
+
+test("late browser HTTP 200 survives cache/restart/export without confirming a timed-out command", async () => {
+  const h = harness(); h.permission = "prompt";
+  const request = { sequence: 3, method: "POST", path: "/app/prepaid/toggle-status", errorCode: "E_API_TIMEOUT",
+    phase: "headers", timeoutMs: 15000, cancelledAt: 1000, cancelledBy: "E_API_TIMEOUT", cancellationOrigin: "request-timeout" };
+  h.reporter.capture({ ...draft(), error: { code: "E_API_TIMEOUT" }, requests: [request], outcomeUnknown: true,
+    command: { desiredOn: false, sent: true, confirmed: false },
+    diagnostics: { revision: 1, network: [{ id: "net-3", operationId: "report-1", sequence: 3, correlation: "unique", events: [{ event: "sendHeaders", at: 900 }] }] } });
+  await h.reporter.queue;
+  const original = structuredClone(h.data[format.key("report-1")].report);
+  assert.equal(original.faultBoundary.browserHttpStatus, null);
+  await h.reporter.enrich("report-1", { revision: 2, site: { at: 2000, observedOn: false },
+    network: [{ id: "net-3", operationId: "report-1", sequence: 3, correlation: "unique", httpStatus: 200,
+      events: [{ event: "headersReceived", at: 1000.4 }, { event: "responseStarted", at: 1000.8 }, { event: "completed", at: 1001 }] }] });
+  h.permission = "granted"; await new ErrorReporter(h.deps).flush();
+  const saved = h.writes.at(-1).report;
+  assert.equal(saved.faultBoundary.browserHttpStatus, 200);
+  assert.equal(saved.faultBoundary.responseHeadersAt, 1000.4);
+  assert.equal(saved.faultBoundary.browserCompletedAt, 1001);
+  assert.ok(Math.abs(saved.faultBoundary.responseHeadersAfterCancellationMs - 0.4) < 1e-9);
+  assert.deepEqual(saved.requests, original.requests);
+  assert.equal(saved.switchCommand.confirmed, false); assert.equal(saved.outcomeUnknown, true);
+  assert.equal(saved.error.code, "E_API_TIMEOUT"); assert.equal(saved.faultBoundary.boundary, "headers");
+});
+
+for (const association of ["other-operation", "other-sequence", "ambiguous"]) test(`browser summary ignores ${association} evidence`, () => {
+  const report = format.makeReport({ ...draft(), requests: [{ sequence: 1, errorCode: "E_HTTP" }], diagnostics: {
+    network: [{ id: "network", operationId: association === "other-operation" ? "elsewhere" : "report-1",
+      sequence: association === "other-sequence" ? 2 : 1, correlation: association === "ambiguous" ? "ambiguous" : "unique",
+      httpStatus: 502, events: [{ event: "headersReceived", at: 1000 }, { event: "completed", at: 1001 }] }] } });
+  for (const key of ["browserHttpStatus", "responseHeadersAt", "browserCompletedAt", "responseHeadersAfterCancellationMs"]) assert.equal(report.faultBoundary[key], null);
+});
+
+test("HTTP recovery cause is sanitized across cache, checkpoint, export and page fallback", async () => {
+  const h = harness(); h.permission = "prompt";
+  const initialFailure = { errorCode: "E_HTTP", httpStatus: 502, path: "/app/prepaid/ac-timer", sequence: 1, token: "SECRET" };
+  const queryRecovery = { id: "recovery-id", initialOperationId: "first-op", initialFailure, rounds: [], outcome: "waiting" };
+  h.reporter.capture({ ...draft(), queryRecovery, run: { id: "run", queryRecovery } }); await h.reporter.queue;
+  const history = createHistory(h.deps.storage); await history.save({ id: "run", queryRecovery });
+  assert.equal((await history.get()).run.queryRecovery.initialFailure.httpStatus, 502);
+  h.permission = "granted"; await new ErrorReporter(h.deps).flush();
+  const exported = h.writes.at(-1).report;
+  assert.deepEqual(exported.queryRecovery.initialFailure, { errorCode: "E_HTTP", httpStatus: 502, path: "/app/prepaid/ac-timer", sequence: 1 });
+  assert.equal(JSON.stringify(exported).includes("SECRET"), false);
+  const fallback = format.makeReport({ ...draft(), snapshotOrigin: "page-cache", run: { queryRecovery } });
+  assert.deepEqual(fallback.queryRecovery.initialFailure, exported.queryRecovery.initialFailure);
+  assert.equal(format.queryRecovery({}).initialFailure, null);
+  assert.equal(format.queryRecovery({ initialFailure: { httpStatus: 999, path: "/private", sequence: -1 } }).initialFailure.httpStatus, null);
+});

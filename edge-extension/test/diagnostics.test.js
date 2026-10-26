@@ -168,7 +168,7 @@ test("a real controller with diagnostics logs a recovered timeout while starting
       getState: async () => ({ run, notice }), setNotice: async value => { notice = value; }, clearKeepAliveNotice: async () => {} },
     alarm: { create: async () => {}, clear: async () => {} }, keepAliveAlarm: { get: async () => null, create: async () => {}, clear: async () => {} },
     page: { isOpen: async () => true }, report: draft => { failures.push(draft); return draft.reportId; },
-    api: createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, diagnostics: h.recorder,
+    api: createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10, diagnostics: h.recorder,
       fetchImpl: async (url, options) => {
         if (url.endsWith("ac-timer") && ++timerCalls === 1) return new Promise(() => {});
         if (options.method === "POST") { actual = true; posts.push(true); }

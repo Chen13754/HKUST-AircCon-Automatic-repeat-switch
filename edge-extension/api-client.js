@@ -2,7 +2,7 @@ import { API_BASE } from "./api-config.js";
 import { timerFromSchoolData } from "./cycle.js";
 import { bounded, CycleError } from "./errors.js";
 
-export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs = 8000, diagnostics, performanceImpl = globalThis.performance, clock = () => Date.now() }) {
+export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs = 8000, switchRequestTimeoutMs = 15000, diagnostics, performanceImpl = globalThis.performance, clock = () => Date.now() }) {
   let sequence = 0;
   const monotonic = () => performanceImpl?.now?.() ?? Date.now();
   const event = (context, trace, step) => { try { diagnostics?.requestEvent(context, trace, step); } catch { /* Best effort. */ } };
@@ -21,10 +21,11 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
 
   async function requestOnce(tabId, path, method, body, signal, attempt, validate) {
     const context = signal?.diagnostic;
+    const timeoutMs = method === "POST" ? switchRequestTimeoutMs : requestTimeoutMs;
     const startedAt = clock();
     const monoStart = monotonic();
     let phaseStart = monoStart, fetchStart, requestSignal, onAbort;
-    const trace = { method, path, attempt, sequence: ++sequence, startedAt, endedAt: null, timeoutMs: requestTimeoutMs,
+    const trace = { method, path, attempt, sequence: ++sequence, startedAt, endedAt: null, timeoutMs,
       phase: "token", timings: {}, httpStatus: null, schoolCode: null, elapsedMs: null, dispatched: false, errorCode: null };
     const onParentAbort = () => {
       trace.cancelledAt ??= clock();
@@ -109,15 +110,17 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
         const value = validate(result.data);
         phase("complete");
         return value;
-      }, { signal, ms: requestTimeoutMs, code: "E_API_TIMEOUT", stage: `${stage} 等待学校响应（包括响应正文）` });
+      }, { signal, ms: timeoutMs, code: "E_API_TIMEOUT", stage: `${stage} 等待学校响应（包括响应正文）` });
     } catch (error) {
       trace.errorCode = error?.code || "E_INTERNAL";
+      // Bind recovery decisions to this exact failed request, never another trace.
+      error.requestSequence = trace.sequence;
       if (signal?.aborted && !trace.cancelledBy) {
         trace.cancelledBy = signal.reason?.code;
         trace.cancelledAt = clock();
         trace.cancellationOrigin = "parent";
       }
-      if (error.code === "E_API_TIMEOUT" && fetchStart !== undefined) trace.timings.timeoutOvershootMs = Math.max(0, monotonic() - fetchStart - requestTimeoutMs);
+      if (error.code === "E_API_TIMEOUT" && fetchStart !== undefined) trace.timings.timeoutOvershootMs = Math.max(0, monotonic() - fetchStart - timeoutMs);
       throw error;
     }
     finally {

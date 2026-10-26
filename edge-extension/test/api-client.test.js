@@ -12,7 +12,7 @@ for (const method of ["readTimer", "readStatus"]) {
       controller.signal.diagnostic = { requests: [] };
       const calls = [];
       let tokens = 0, finish;
-      const api = createSchoolApi({ getToken: async () => `token-${++tokens}`, requestTimeoutMs: 10,
+      const api = createSchoolApi({ getToken: async () => `token-${++tokens}`, requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
         fetchImpl: async (_url, opts) => {
           calls.push(opts);
           if (calls.length === 1) {
@@ -40,7 +40,7 @@ for (const method of ["readTimer", "readStatus"]) {
 for (const bodyHangs of [false, true]) {
   test(`POST ${bodyHangs ? "body" : "headers"} timeout never retries`, async () => {
     let calls = 0, transport;
-    const api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10,
+    const api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
       fetchImpl: async (_url, opts) => {
         calls++; transport = opts.signal;
         return bodyHangs ? { ok: true, status: 200, json: () => new Promise(() => {}) } : new Promise(() => {});
@@ -57,7 +57,7 @@ test("cancellation while refreshing the retry token cannot dispatch another GET"
   controller.signal.diagnostic = { requests: [] };
   let tokens = 0, calls = 0, finishToken, entered;
   const retrying = new Promise(resolve => { entered = resolve; });
-  const api = createSchoolApi({ requestTimeoutMs: 10,
+  const api = createSchoolApi({ requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     getToken: (_tab, signal) => {
       if (++tokens === 1) return "token-1";
       return bounded(() => new Promise(resolve => { finishToken = resolve; entered(); }), { signal });
@@ -76,7 +76,7 @@ test("cancellation while refreshing the retry token cannot dispatch another GET"
 
 test("a second attempt authentication rejection stops without a third request", async () => {
   let calls = 0;
-  const api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10,
+  const api = createSchoolApi({ getToken: async () => "token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10,
     fetchImpl: async () => ++calls === 1 ? new Promise(() => {}) : { ok: false, status: 401 }
   });
   await assert.rejects(api.readTimer(8), { code: "E_AUTH" });
@@ -106,7 +106,7 @@ for (const bodyHangs of [false, true]) {
     let bodyReads = 0;
     const controller = new AbortController();
     controller.signal.diagnostic = { requests: [] };
-    const api = createSchoolApi({ getToken: async () => "test-token", requestTimeoutMs: 10, fetchImpl: async (_url, opts) => {
+    const api = createSchoolApi({ getToken: async () => "test-token", requestTimeoutMs: 10, switchRequestTimeoutMs: 10, fetchImpl: async (_url, opts) => {
       calls++;
       signals.push(opts.signal);
       const late = new Promise(resolve => { finishes.push(resolve); });
@@ -172,7 +172,7 @@ test("page timeout and network failure have different codes", async () => {
 
 for (const code of ["E_CANCELLED", "E_PAGE_RELOADING", "E_OPERATION_TIMEOUT", "E_QUERY_RECOVERY_TIMEOUT"]) test(`${code} records parent cancellation rather than a request timeout`, async () => {
   const controller = new AbortController(); controller.signal.diagnostic = { requests: [] };
-  const api = createSchoolApi({ getToken: async () => "token", fetchImpl: () => new Promise(() => {}), requestTimeoutMs: 1000 });
+  const api = createSchoolApi({ getToken: async () => "token", fetchImpl: () => new Promise(() => {}), requestTimeoutMs: 1000, switchRequestTimeoutMs: 1000 });
   const pending = assert.rejects(api.readStatus(8, controller.signal), { code });
   await new Promise(resolve => setImmediate(resolve)); controller.abort(new CycleError(code, "cancel")); await pending;
   const trace = controller.signal.diagnostic.requests[0];
@@ -209,3 +209,57 @@ for (const [name, token, fetchReply, phase, code] of [
     assert.equal(calls, phase === "token" ? 0 : 1);
   });
 }
+
+for (const bodyHangs of [false, true]) test(`default POST accepts a 9s ${bodyHangs ? "body" : "header"} response with a 15s budget`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 100000 });
+  let finish, calls = 0;
+  const parent = new AbortController(); parent.signal.diagnostic = { requests: [], command: {} };
+  const api = createSchoolApi({ getToken: async () => "mock", performanceImpl: { now: () => Date.now() }, fetchImpl: async () => {
+    calls++;
+    const pending = new Promise(resolve => { finish = resolve; });
+    return bodyHangs ? { ok: true, status: 200, json: () => pending } : pending;
+  } });
+  const task = api.setStatus(8, false, parent.signal);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(9000);
+  finish(bodyHangs ? { meta: { code: 200 }, data: { ac_toggle: { Message: "Execution succeeded" } } } : response({ ac_toggle: { Message: "Execution succeeded" } }));
+  await task;
+  assert.equal(calls, 1);
+  assert.equal(parent.signal.diagnostic.requests[0].timeoutMs, 15000);
+  assert.equal(parent.signal.diagnostic.requests[0].elapsedMs, 9000);
+});
+
+for (const method of ["readStatus", "setStatus"]) test(`${method} retains its independent default deadline and ignores late completion`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 100000 });
+  const parent = new AbortController(); parent.signal.diagnostic = { requests: [], command: {} };
+  const finishes = [], signals = [];
+  const api = createSchoolApi({ getToken: async () => "mock", performanceImpl: { now: () => Date.now() }, fetchImpl: async (_url, options) => {
+    signals.push(options.signal); return new Promise(resolve => finishes.push(resolve));
+  } });
+  const task = method === "setStatus" ? api.setStatus(8, false, parent.signal) : api.readStatus(8, parent.signal);
+  const rejected = assert.rejects(task, { code: "E_API_TIMEOUT" });
+  await new Promise(resolve => setImmediate(resolve));
+  const budget = method === "setStatus" ? 15000 : 8000;
+  t.mock.timers.tick(budget); await new Promise(resolve => setImmediate(resolve));
+  if (method === "readStatus") { t.mock.timers.tick(budget); await new Promise(resolve => setImmediate(resolve)); }
+  await rejected;
+  assert.equal(signals.length, method === "setStatus" ? 1 : 2);
+  assert.ok(signals.every(signal => signal.aborted));
+  assert.ok(parent.signal.diagnostic.requests.every(trace => trace.timeoutMs === budget));
+  const before = structuredClone(parent.signal.diagnostic.requests);
+  finishes.forEach(finish => finish(response({ ac_toggle: { Message: "Execution succeeded" }, ac_status: { DisconnectRelay: false } })));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(parent.signal.diagnostic.requests, before);
+});
+
+for (const code of ["E_CANCELLED", "E_OPERATION_TIMEOUT"]) test(`15s POST respects earlier ${code} without retransmission`, async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 100000 });
+  const parent = new AbortController(); parent.signal.diagnostic = { requests: [], command: {} };
+  let calls = 0;
+  const api = createSchoolApi({ getToken: async () => "mock", fetchImpl: async () => { calls++; return new Promise(() => {}); } });
+  const rejected = assert.rejects(api.setStatus(8, false, parent.signal), { code });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(1000); parent.abort(new CycleError(code, "simulated")); await rejected;
+  assert.equal(calls, 1); assert.equal(parent.signal.diagnostic.requests[0].cancellationOrigin, "parent");
+  assert.equal(parent.signal.diagnostic.requests[0].cancelledBy, code);
+});

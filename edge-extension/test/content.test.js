@@ -14,15 +14,20 @@ function editTimes(h, on, off) {
   inputs[0].value = String(on); inputs[1].value = String(off); inputs[0].handlers.input();
 }
 
-test("query recovery shows its absolute remaining window, preserves drafts and permits stopping", async () => {
+for (const [initialFailure, reason] of [
+  [{ errorCode: "E_API_TIMEOUT" }, /查询超时/],
+  ...[502, 503, 504].map(httpStatus => [{ errorCode: "E_HTTP", httpStatus }, new RegExp(`HTTP ${httpStatus}`)]),
+  [undefined, /查询暂时异常/]
+]) test(`query recovery ${initialFailure?.httpStatus ?? initialFailure?.errorCode ?? "legacy"} preserves drafts and permits stopping`, async () => {
   const state = timedView(); let recovering = false;
   const h = harness(msg => ({ ok: true, view: msg.type === "aircon:stop" ? idle : recovering ? { ...state, run: { ...state.run,
-    queryRecovery: { id: "incident", deadline: Date.now() + 14000 }, recovery: { kind: "query" } } } : state }));
+    queryRecovery: { id: "incident", initialFailure, deadline: Date.now() + 14000 }, recovery: { kind: "query" } } } : state }));
   await flush(); editTimes(h, 12, 4); recovering = true; h.changed(); await flush();
   assert.equal(h.panel.querySelectorAll("input")[0].value, "12");
   assert.equal(h.panel.querySelectorAll("input")[0].disabled, true);
   assert.equal(h.button("update").disabled, true); assert.equal(h.button("stop").disabled, false);
-  assert.match(h.panel.querySelector(".ac-cycle-status").textContent, /查询超时.*剩 1[34] 秒.*停止/);
+  assert.match(h.panel.querySelector(".ac-cycle-status").textContent, reason);
+  assert.match(h.panel.querySelector(".ac-cycle-status").textContent, /剩 1[34] 秒.*停止/);
   h.button("stop").handlers.click(); await flush(); assert.equal(h.button("start").disabled, false);
 });
 
@@ -1114,7 +1119,7 @@ test("manual-check communication fallback caches its trigger without retrying", 
   await flush();
   const report = Object.values(h.reports)[0].report;
   assert.equal(report.error.code, "E_BACKGROUND_EMPTY_REPLY");
-  assert.equal(report.extensionVersion, "1.1.18");
+  assert.equal(report.extensionVersion, "1.1.19");
   assert.deepEqual(JSON.parse(JSON.stringify(report.manualCheck)), { trigger: "click", observedOn: true });
   assert.deepEqual(calls, ["aircon:initialize", "aircon:manualCheck"]);
 });

@@ -172,7 +172,7 @@ test("school API replay: two eight-second stalls then healthy at +46s produces o
   const h = harness(); await h.controller.start(8, 1, 10); const due = h.run.nextAt; h.at(due);
   let healthy = false, actual = true; const calls = [];
   const reply = data => ({ ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data }) });
-  h.controller.api = createSchoolApi({ clock: h.now, requestTimeoutMs: 5, getToken: async () => "token",
+  h.controller.api = createSchoolApi({ clock: h.now, requestTimeoutMs: 5, switchRequestTimeoutMs: 5, getToken: async () => "token",
     fetchImpl: async (url, opts) => {
       const path = url.split("/").at(-1); calls.push([path, opts.method]);
       if (path === "ac-status" && !healthy) { h.at(h.now() + 8000); return new Promise(() => {}); }
@@ -243,4 +243,119 @@ test("the initial recovery alarm failure retains initial evidence and reports th
   assert.equal(h.run, null); assert.equal(h.posts.length, 0); assert.equal(h.reports.length, 2);
   assert.equal(h.reports[0].error.code, "E_API_TIMEOUT"); assert.equal(h.reports[1].error.code, "E_LOCAL_TIMEOUT");
   assert.equal(h.reports[1].queryRecovery.outcome, "stopped");
+});
+
+async function httpRecovery(status = 502, failedPath = "ac-timer", phase = "on") {
+  const h = harness(); await h.controller.start(8, 1, 10, { documentId: "doc-1" });
+  if (phase === "off") { h.at(h.run.nextAt); await h.controller.tick(h.run.id); }
+  let healthy = false, actual = phase === "on";
+  const calls = [], reply = data => ({ ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data }) });
+  Object.assign(h.api, createSchoolApi({ getToken: async () => "mock", clock: h.now, fetchImpl: async (url, options) => {
+    const path = url.split("/").at(-1); calls.push([path, options.method]);
+    if (!healthy && (failedPath === "both" || failedPath === path)) return { ok: false, status };
+    if (options.method === "POST") { actual = JSON.parse(options.body).toggle.status === 1; return reply({ ac_toggle: { Message: "Execution succeeded" } }); }
+    return reply({ ac_status: { DisconnectRelay: actual } });
+  } }));
+  const before = structuredClone(h.run); h.at(before.nextAt);
+  await h.controller.tick(before.id, before.nextAt);
+  return { h, calls, before, healthy: () => { healthy = true; } };
+}
+
+for (const status of [502, 503, 504]) for (const path of ["ac-timer", "ac-status"]) for (const phase of ["on", "off"]) {
+  test(`${phase} ${path} HTTP ${status} waits 30s, fully rechecks once and retains initial evidence`, async () => {
+    const { h, calls, before, healthy } = await httpRecovery(status, path, phase);
+    assert.equal(calls.length, 2, "HTTP failures have no immediate retry");
+    assert.equal(h.run.recovery.nextAttemptAt, before.nextAt + 30000);
+    assert.equal(h.run.recovery.deadline, before.nextAt + 60000);
+    const initial = structuredClone(h.reports[0]);
+    assert.equal(initial.queryRecovery.initialFailure.httpStatus, status);
+    assert.equal(initial.queryRecovery.initialFailure.path, `/app/prepaid/${path}`);
+    assert.equal(initial.error.code, "E_HTTP");
+    healthy(); calls.length = 0; h.at(h.run.recovery.nextAttemptAt);
+    await Promise.all([h.controller.recoveryExpired(before.id), h.controller.recoveryExpired(before.id)]);
+    assert.equal(calls.filter(([, method]) => method === "POST").length, 1);
+    assert.deepEqual(calls.slice(0, 2).map(([name]) => name), ["ac-timer", "ac-status"]);
+    assert.equal(h.run.phase, phase === "on" ? "off" : "on");
+    assert.equal(h.reports.length, 2); assert.deepEqual(h.reports[0], initial);
+    assert.equal(h.reports[1].error.code, "E_HTTP"); assert.equal(h.reports[1].recovered, true);
+    assert.deepEqual(h.reports[1].queryRecovery.initialFailure, initial.queryRecovery.initialFailure);
+  });
+}
+
+for (const status of [400, 401, 403, 404, 429, 500]) test(`HTTP ${status} is not eligible for delayed recovery`, async () => {
+  const { h, calls } = await httpRecovery(status);
+  assert.equal(h.run, null); assert.equal(calls.length, 2); assert.equal(h.recovery.size, 0);
+});
+
+test("both HTTP 502 responses retain the causal request; a failed delayed round stops", async () => {
+  const { h, calls, before } = await httpRecovery(502, "both");
+  assert.equal(h.reports.length, 1);
+  const cause = h.reports[0].queryRecovery.initialFailure;
+  const failed = h.reports[0].requests.find(trace => trace.sequence === cause.sequence);
+  assert.equal(failed.errorCode, "E_HTTP"); assert.equal(failed.path, cause.path);
+  assert.ok(h.reports[0].requests.every(trace => trace.httpStatus === 502));
+  h.at(h.run.recovery.nextAttemptAt); await h.controller.recoveryExpired(before.id);
+  assert.equal(h.run, null); assert.equal(h.reports.length, 2);
+  assert.equal(h.reports[1].queryRecovery.outcome, "stopped");
+  await h.controller.recoveryExpired(before.id);
+  assert.equal(calls.filter(([, method]) => method === "POST").length, 0);
+  assert.equal(h.reports.length, 2);
+});
+
+for (const action of ["stop", "cold", "reload", "authentication", "expired", "storage", "unknown-post", "state-conflict"]) {
+  test(`HTTP recovery ${action} preserves deadlines, cause and single-dispatch rules`, async () => {
+    const { h, calls, before, healthy } = await httpRecovery();
+    const deadline = h.run.recovery.deadline; healthy();
+    if (action === "stop") {
+      await h.controller.stop(8); await h.controller.recoveryExpired(before.id);
+      assert.equal(h.run, null); assert.equal(h.reports.at(-1).error.code, "E_HTTP");
+      assert.equal(h.reports.at(-1).queryRecovery.outcome, "cancelled");
+    } else {
+      let controller = h.controller;
+      if (action === "cold") { controller = h.make(); await controller.reconcile(); }
+      if (["reload", "authentication"].includes(action)) {
+        await controller.suspend(8, { event: action === "reload" ? "loading" : "authentication", route: action === "reload" ? "home" : "login" });
+        await controller.initialize(8, { documentId: "doc-2" });
+      }
+      assert.equal(h.run.recovery.deadline, deadline);
+      h.at(action === "expired" ? deadline : h.run.recovery.nextAttemptAt);
+      if (action === "storage") controller.history.save = async () => { throw new CycleError("E_LOCAL_STORAGE", "simulated"); };
+      if (action === "state-conflict") h.api.readStatus = async () => false;
+      if (action === "unknown-post") h.api.setStatus = async (_tab, _desired, signal) => {
+        calls.push(["toggle-status", "POST"]); signal.diagnostic.command.sent = true; throw new CycleError("E_API_TIMEOUT", "simulated");
+      };
+      await controller.recoveryExpired(before.id);
+      if (["cold", "reload", "authentication"].includes(action)) assert.equal(h.run.phase, "off"); else assert.equal(h.run, null);
+      if (action === "unknown-post") assert.equal(h.reports.at(-1).outcomeUnknown, true);
+    }
+    assert.equal(h.reports.at(-1).queryRecovery.initialFailure.httpStatus, 502);
+    assert.equal(calls.filter(([, method]) => method === "POST").length, ["cold", "reload", "authentication", "unknown-post"].includes(action) ? 1 : 0);
+  });
+}
+
+test("HTTP recovery never borrows another request's status or infers it from error text", async () => {
+  const h = harness(); await h.controller.start(8, 1, 10); h.at(h.run.nextAt);
+  h.api.readTimer = async (_tab, signal) => {
+    signal.diagnostic.requests.push({ sequence: 999, method: "GET", path: "/app/prepaid/ac-timer", httpStatus: 502, errorCode: "E_HTTP" });
+    const error = new CycleError("E_HTTP", "HTTP 502"); error.requestSequence = 1000; throw error;
+  };
+  await h.controller.tick(h.run.id); assert.equal(h.run, null); assert.equal(h.recovery.size, 0);
+});
+
+test("HTTP failure cancels an unfinished sibling before saving its recovery report", async () => {
+  const h = harness(); await h.controller.start(8, 1, 10); h.at(h.run.nextAt);
+  let finish, transport;
+  Object.assign(h.api, createSchoolApi({ getToken: async () => "mock", fetchImpl: async (url, options) => {
+    if (url.endsWith("ac-timer")) return { ok: false, status: 503 };
+    transport = options.signal; return new Promise(resolve => { finish = resolve; });
+  } }));
+  await h.controller.tick(h.run.id);
+  assert.equal(transport.aborted, true);
+  assert.equal(h.reports[0].queryRecovery.initialFailure.httpStatus, 503);
+  assert.equal(h.reports[0].requests[1].cancelledBy, "E_CANCELLED");
+  assert.equal(h.reports[0].requests[1].cancellationOrigin, "parent");
+  const original = structuredClone(h.reports[0]);
+  finish({ ok: false, status: 504 }); await flush();
+  assert.deepEqual(h.reports[0], original);
+  await h.controller.stop(8);
 });

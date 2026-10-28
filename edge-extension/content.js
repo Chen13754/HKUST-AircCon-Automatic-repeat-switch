@@ -109,13 +109,14 @@
       const report = format.makeReport({
         reportId, startedAt, source: "pageCommunication", error,
         run: view.run, snapshotOrigin: "page-cache", outcomeUnknown: true,
+        postCommandVerification: view.postCommandVerification,
         cachedAt, visibility: document.visibilityState, durations, manualCheck,
         timingChange: timingRequest ? { at: startedAt, runId: timingRequest.runId, expectedRevision: timingRequest.timingRevision,
           requested: durations, before: view.run ? { onMinutes: view.run.onMinutes, offMinutes: view.run.offMinutes } : null,
           phase: view.run?.phase, phaseStartedAt: view.run?.phaseStartedAt, previousNextAt: view.run?.nextAt, outcome: "unknown" } : undefined,
         diagnostics: { coverage: { journal: "unavailable" }, site: pageEvidence(), events: pageEvents, network: pageResources },
         communication: { messageType, reason: error.communicationReason, tabIsHome: isHome() }
-      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.19", userAgent: globalThis.navigator?.userAgent });
+      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.20", userAgent: globalThis.navigator?.userAgent });
       chrome.storage.local.set({ [format.fallbackKey(report.reportId)]: { report, saved: false } }).then(async () => {
         reportStatus = { phase: "cached", pending: 1 };
         render();
@@ -252,6 +253,8 @@
   function render() {
     if (!panel?.isConnected) return;
     const run = view.run;
+    const verification = !run && globalThis.AirconReportFormat.postCommandVerification(view.postCommandVerification);
+    const verifying = verification && ["pending", "running", "waiting"].includes(verification.state);
     if (pendingManualCheck && pendingManualCheck.runId !== run?.id) cancelManualCheck();
     const { start, stop, update, inputs, status, message } = ui;
     if (run && (!draftEdited || (draftRunId && draftRunId !== run.id))) {
@@ -278,7 +281,7 @@
       const nextAt = origin + values[run.phase === "on" ? 0 : 1] * 60_000;
       setText(ui.timingHint, !valid ? "尚未应用：请输入 1–1440 分钟的整数。" : `尚未应用：当前仍为开 ${run.onMinutes}／关 ${run.offMinutes} 分钟。${nextAt <= Date.now() ? `应用后将立即核验并${run.phase === "on" ? "关机" : "开机"}。` : `应用后当前阶段约剩 ${formatRemaining(nextAt)}。`}`);
     }
-    const stopDisabled = view.elsewhere || (!view.blocked && !loading && !busy && !run && !needsConfirmation);
+    const stopDisabled = view.elsewhere || (!view.blocked && !loading && !busy && !run && !needsConfirmation && !verifying);
     if (stop.disabled !== stopDisabled) stop.disabled = stopDisabled;
     start.hidden = Boolean(run) && (!busy || busyType === "aircon:updateDurations") && !uncertain;
     stop.hidden = stopDisabled;
@@ -292,6 +295,13 @@
     let text;
     if (busy) text = `正在操作（已等待 ${Math.floor((Date.now() - busySince) / 1000)} 秒，最长等待 ${OPERATION_REPLY_TIMEOUT_MS / 1000} 秒）…`;
     else if (view.blocked) text = "已禁止后续开关指令。";
+    else if (verifying) text = `循环已停止，正在只读核验，最多还剩 ${Math.max(0, Math.ceil((verification.deadlineAt - Date.now()) / 1000))} 秒；停止可取消。开关结果仍未确认。`;
+    else if (verification) {
+      const conclusions = { target_observed: "观察到目标状态", original_observed: "观察到原状态", changed: "两轮状态发生变化", unknown: "未获得有效状态" };
+      const states = { completed: "只读核验完成", cancelled: "只读核验已取消", interrupted: "只读核验中断", not_run: "只读核验未执行", expired: "只读核验已到期限" };
+      const timer = verification.rounds.at(-1)?.timerPresent;
+      text = `${states[verification.state] ?? "只读核验"}：${conclusions[verification.conclusion] ?? conclusions.unknown}。学校定时器：${timer === true ? "存在" : timer === false ? "未检测到" : "未知"}。这不能确认原指令成功，循环保持停止，请自行确认状态后点击停止。`;
+    }
     else if (needsConfirmation) text = "操作结果未确认，请先确认学校页面的空调状态，再点击停止。";
     else if (run?.queryRecovery) text = `${run.queryRecovery.initialFailure?.errorCode === "E_HTTP" ? `学校接口暂时异常（HTTP ${run.queryRecovery.initialFailure.httpStatus ?? "未知"}）` : run.queryRecovery.initialFailure?.errorCode === "E_API_TIMEOUT" ? "查询超时" : "查询暂时异常"}，${run.recovery?.kind === "authentication" ? "等待学校认证恢复" : loading || run.recovery?.kind === "reload" ? "等待页面恢复" : "等待重新核验"}；恢复期限还剩 ${Math.max(0, Math.ceil((run.queryRecovery.deadline - Date.now()) / 1000))} 秒，停止仍可取消。`;
     else if (run?.recovery?.kind === "authentication") text = "学校认证恢复中，暂不切换空调；最多等待 60 秒，返回后核验并接续原计划。";
@@ -303,7 +313,7 @@
     } else if (view.elsewhere) text = "循环正在另一学校页面运行。";
     else text = "循环未运行。";
     setText(status, text);
-    status.hidden = !view.blocked && !loading && !busy && !needsConfirmation && !run && !view.elsewhere;
+    status.hidden = !verification && !view.blocked && !loading && !busy && !needsConfirmation && !run && !view.elsewhere;
     const notice = view.notice;
     const noticeText = notice?.previous ? `上次循环${Number.isFinite(notice.at) ? `（${new Date(notice.at).toLocaleString()}）` : ""}：${notice.text}` : notice?.text;
     setText(message, localError || noticeText || "");
@@ -574,6 +584,6 @@
   observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-checked"] });
   mount();
   setInterval(() => {
-    if (view.run || busy) render();
+    if (view.run || busy || view.postCommandVerification) render();
   }, 1000);
 })();

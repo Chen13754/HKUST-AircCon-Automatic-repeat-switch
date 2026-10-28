@@ -29,6 +29,7 @@
     E_CANCELLED: "操作已取消。", E_TIMEOUT: "内部等待超时。", E_INTERNAL: "扩展内部异常。"
   };
   const sources = new Set(["start", "updateDurations", "tick", "manualCheck", "keepAlive", "keepAliveSchedule", "initialize", "reconcile", "getState", "stop", "cleanup", "pageCommunication", "openReportSettings", "lifecycle", "recovery", "background", "readRecovery", "authRecovery", "queryRecovery"]);
+  sources.add("postCommandVerification");
   const paths = new Set(["/app/prepaid/ac-status", "/app/prepaid/ac-timer", "/app/prepaid/toggle-status"]);
   const messageTypes = new Set(["aircon:initialize", "aircon:getState", "aircon:start", "aircon:updateDurations", "aircon:stop", "aircon:manualCheck", "aircon:openReportSettings"]);
   const communicationReasons = new Set(["NO_RECEIVER", "PORT_CLOSED", "CHANNEL_CLOSED", "CONTEXT_INVALIDATED", "NULL_REPLY", "UNDEFINED_REPLY", "TIMEOUT", "UNKNOWN", "INVALID_REPLY", "ACCEPTED", "EXTENSION_MISMATCH", "TAB_ID_MISSING", "FRAME_REJECTED", "SOURCE_REJECTED", "TAB_URL_MISSING", "TAB_NOT_HOME"]);
@@ -303,6 +304,23 @@
       wasDiscarded: bool(value.wasDiscarded), discarded: bool(value.discarded), frozen: bool(value.frozen)
     };
   }
+  function postCommandVerification(value) {
+    if (!value || typeof value !== "object") return null;
+    return {
+      reportId: identifier(value.reportId), operationId: identifier(value.operationId), runId: identifier(value.runId),
+      tabId: tabId(value.tabId), documentId: identifier(value.documentId), desiredOn: bool(value.desiredOn),
+      triggerCode: cleanCode(value.triggerCode), triggerSequence: positive(value.triggerSequence),
+      cancelledAt: time(value.cancelledAt), deadlineAt: time(value.deadlineAt), nextAt: time(value.nextAt), endedAt: time(value.endedAt), revision: positive(value.revision),
+      state: pick(value.state, ["pending", "running", "waiting", "completed", "cancelled", "interrupted", "not_run", "expired"]),
+      reason: pick(value.reason, ["two_rounds", "deadline", "user_action", "page_unavailable", "page_changed", "page_closed", "session_ended", "worker_interrupted", "storage_failure", "page_identity_missing"]),
+      conclusion: pick(value.conclusion, ["target_observed", "original_observed", "changed", "unknown"]),
+      rounds: (Array.isArray(value.rounds) ? value.rounds : []).slice(0, 2).map(r => ({
+        operationId: identifier(r.operationId), scheduledAt: time(r.scheduledAt), startedAt: time(r.startedAt), endedAt: time(r.endedAt),
+        actualOn: bool(r.actualOn), timerPresent: bool(r.timerPresent), actualOnError: cleanCode(r.actualOnError), timerPresentError: cleanCode(r.timerPresentError), errorCode: cleanCode(r.errorCode),
+        requests: (Array.isArray(r.requests) ? r.requests : []).slice(0, 2).map(requestTrace)
+      }))
+    };
+  }
   function makeReport(draft = {}, environment = {}) {
     const code = Object.hasOwn(messages, draft.error?.code) ? draft.error.code : "E_INTERNAL";
     const at = time(draft.at) ?? Date.now();
@@ -336,6 +354,7 @@
       diagnostics: diagnostics(draft.diagnostics),
       faultBoundary: faultBoundary(draft, code),
       queryRecovery: queryRecovery(draft.queryRecovery ?? draft.run?.queryRecovery),
+      postCommandVerification: postCommandVerification(draft.postCommandVerification),
       cycle: cycle(draft.run),
       requestedDurations: draft.durations ? { onMinutes: number(draft.durations.onMinutes), offMinutes: number(draft.durations.offMinutes) } : null,
       timingChange: timingChange(draft.timingChange ?? draft.run?.lastTimingChange),
@@ -353,5 +372,5 @@
     const stamp = new Date(report.operation.startedAt).toISOString().replace(/[:.]/g, "-");
     return `aircon-error-${stamp}-${report.reportId}.json`;
   }
-  globalThis.AirconReportFormat = Object.freeze({ makeReport, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
+  globalThis.AirconReportFormat = Object.freeze({ makeReport, postCommandVerification, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
 })();

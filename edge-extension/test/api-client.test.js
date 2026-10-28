@@ -5,6 +5,16 @@ import { bounded, CycleError } from "../errors.js";
 
 const response = data => ({ ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data }) });
 
+test("read-only verification checks its absolute deadline after token acquisition before dispatch", async () => {
+  let calls = 0, now = 100000;
+  const controller = new AbortController();
+  controller.signal.diagnostic = { readOnlyVerification: true, readDeadlineAt: 145000, requests: [] };
+  const api = createSchoolApi({ getToken: async () => { now = 145000; return "fake"; }, clock: () => now,
+    retryGetTimeouts: false, fetchImpl: async () => { calls++; return response({}); } });
+  await assert.rejects(api.readStatus(8, controller.signal), { code: "E_OPERATION_TIMEOUT" });
+  assert.equal(calls, 0); assert.equal(controller.signal.diagnostic.requests[0].dispatched, false);
+});
+
 for (const method of ["readTimer", "readStatus"]) {
   for (const bodyHangs of [false, true]) {
     test(`${method} recovers from one ${bodyHangs ? "body" : "headers"} timeout with a fresh token`, async () => {

@@ -14,6 +14,17 @@ function editTimes(h, on, off) {
   inputs[0].value = String(on); inputs[1].value = String(off); inputs[0].handlers.input();
 }
 
+for (const state of ["waiting", "completed", "interrupted"]) test(`post-command ${state} retains uncertainty and stop; cancellation restores normal controls`, async () => {
+  const h = harness(msg => ({ ok: true, view: msg.type === "aircon:stop" ? idle : { ...idle,
+    notice: { kind: "error", text: "开关超时", outcomeUnknown: true },
+    postCommandVerification: { state, deadlineAt: Date.now() + 35000, conclusion: "target_observed", rounds: [{ actualOn: true, timerPresent: false }] }
+  } }));
+  await flush();
+  assert.equal(h.button("start").disabled, true); assert.equal(h.button("stop").disabled, false);
+  assert.match(h.panel.querySelector(".ac-cycle-status").textContent, state === "waiting" ? /只读核验.*剩.*秒.*结果仍未确认/ : /观察到目标状态.*不能确认原指令成功/);
+  h.button("stop").handlers.click(); await flush(); assert.equal(h.button("start").disabled, false);
+});
+
 for (const [initialFailure, reason] of [
   [{ errorCode: "E_API_TIMEOUT" }, /查询超时/],
   ...[502, 503, 504].map(httpStatus => [{ errorCode: "E_HTTP", httpStatus }, new RegExp(`HTTP ${httpStatus}`)]),
@@ -328,7 +339,7 @@ test("page timeout stages its fallback without overwriting a detailed backend re
     return { ok: true, view: idle };
   });
   await flush(); h.button("start").handlers.click(); await flush();
-  [...h.timers.values()].find(timer => timer.ms === 35000).fn(); await flush();
+  [...h.timers.values()].find(timer => timer.ms > 34000 && timer.ms <= 35000).fn(); await flush();
   assert.deepEqual(h.reports[`airconErrorReport:${reportId}`], original);
   const fallback = h.reports[`airconErrorFallback:${reportId}`].report;
   assert.equal(fallback.snapshotOrigin, "page-cache");
@@ -1119,7 +1130,7 @@ test("manual-check communication fallback caches its trigger without retrying", 
   await flush();
   const report = Object.values(h.reports)[0].report;
   assert.equal(report.error.code, "E_BACKGROUND_EMPTY_REPLY");
-  assert.equal(report.extensionVersion, "1.1.19");
+  assert.equal(report.extensionVersion, "1.1.20");
   assert.deepEqual(JSON.parse(JSON.stringify(report.manualCheck)), { trigger: "click", observedOn: true });
   assert.deepEqual(calls, ["aircon:initialize", "aircon:manualCheck"]);
 });

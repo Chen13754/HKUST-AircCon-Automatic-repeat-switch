@@ -11,7 +11,7 @@ const run = phase => ({ id: `preview-${++runNumber}`, phase, expectedOn: phase =
   startedAt: Date.now() - 420000, phaseStartedAt: Date.now() - 420000, timingRevision: 0, nextAt: Date.now() + 180000 });
 window.chrome = {
   runtime: {
-    getManifest: () => ({ version: "1.1.19" }),
+    getManifest: () => ({ version: "1.1.20" }),
     onMessage: { addListener: listener => listeners.push(listener) },
     async sendMessage(message) {
       calls.push(message.type);
@@ -45,7 +45,7 @@ window.chrome = {
         }
         view.notice = { kind: "info", text: "时长已更新，当前及后续循环使用新设置。（本地模拟）" };
       }
-      if (message.type === "aircon:stop") { view.run = null; if (!view.blocked) view.notice = null; view.elsewhere = false; }
+      if (message.type === "aircon:stop") { view.run = null; view.postCommandVerification = null; if (!view.blocked) view.notice = null; view.elsewhere = false; }
       return reply();
     }
   },
@@ -66,6 +66,10 @@ document.getElementById("scenario").addEventListener("change", async event => {
   scenario = event.target.value;
   view.run = ["on", "off", "warning", "recovering", "query-recovering", "http-recovering", "blocked"].includes(scenario) ? run(scenario === "off" ? "off" : "on") : null;
   view.blocked = scenario === "blocked";
+  view.postCommandVerification = ["verifying", "verified"].includes(scenario) ? {
+    state: scenario === "verifying" ? "waiting" : "completed", deadlineAt: Date.now() + 35000,
+    conclusion: scenario === "verifying" ? "original_observed" : "target_observed", rounds: [{ actualOn: scenario === "verified", timerPresent: false }]
+  } : null;
   if (scenario === "recovering") view.run.recovery = { deadline: Date.now() + 60000 };
   if (["query-recovering", "http-recovering"].includes(scenario)) {
     view.run.queryRecovery = { id: "preview-incident", deadline: Date.now() + 44000,
@@ -81,6 +85,7 @@ document.getElementById("scenario").addEventListener("change", async event => {
       ? "[E_COMMAND_UNKNOWN] 中断时存在尚未确认的开关指令，禁止自动重发；请自行确认空调状态。"
       : "[E_SESSION_ENDED] 浏览器或扩展会话已结束，具体原因未知；上次循环未恢复。" };
   if (scenario === "blocked") view.notice = { kind: "error", text: "[E_LOCAL_STORAGE] 循环清理失败，已禁止后续空调指令；请重新加载扩展并确认空调状态。" };
+  if (view.postCommandVerification) view.notice = { kind: "error", outcomeUnknown: true, text: "开关请求等待超时，原指令结果未知；后续查询仅提供状态观察，不自动重发或接续。（本地模拟）" };
   notify({ type: "aircon:stateChanged" });
   for (let i = 0; i < 12; i++) await Promise.resolve();
   if (["busy", "unknown"].includes(scenario)) document.querySelector(".ac-cycle-start").click();

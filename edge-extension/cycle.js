@@ -45,6 +45,8 @@ export class CycleController {
   constructor({ store, alarm, keepAliveAlarm, recoveryAlarm = { create: async () => {}, clear: async () => {} }, history = { get: async () => null, save: async () => {}, finish: async () => {} }, api, page, diagnostics, clock = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), id = () => crypto.randomUUID(), notify = async () => {}, report = () => null, operationTimeoutMs = OPERATION_TIMEOUT_MS, localTimeoutMs = 2000 }) {
     Object.assign(this, { store, alarm, api, page, clock, sleep, id, notify, operationTimeoutMs });
     this.report = report;
+    this.onStopped = () => {};
+    this.verificationGeneration = () => 0;
     this.diagnostics = diagnostics;
     // Bound each local API separately. Do not race the entire control task:
     // its cleanup must finish before the next queued operation can run.
@@ -226,6 +228,7 @@ export class CycleController {
 
   operation(tabId, work, context = this.diagnostic("getState")) {
     context.tabId = tabId;
+    context.verificationGeneration = this.verificationGeneration(tabId);
     const revision = this.revisions.get(tabId) || 0;
     return this.enqueue(async () => {
       if (this.writeFault) throw this.writeFault;
@@ -833,10 +836,15 @@ export class CycleController {
       this.recordError(this.writeFault, cleanup, run);
       if (!historyError) await this.history.finish(run, notice, { ...cleanup, at: notice.at, outcomeUnknown: notice.outcomeUnknown }).catch(() => {});
     }
-    await this.store.setNotice(notice);
-    await this.notify(run.tabId);
+    let noticeError;
+    try { await this.store.setNotice(notice); await this.notify(run.tabId); }
+    catch (error) { noticeError = error; }
+    // Diagnostics starts only after the original report and stop cleanup settle.
+    // This callback must not await read-only network work inside the control queue.
+    try { this.onStopped(draft, failed || historyError || noticeError ? "storage_failure" : null); } catch { /* Diagnostic only. */ }
     if (failed) throw this.writeFault;
     if (historyError) throw historyError;
+    if (noticeError) throw noticeError;
   }
 
   async ensureStatus(tabId, desired, knownStatus, signal) {

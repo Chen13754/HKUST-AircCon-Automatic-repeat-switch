@@ -74,6 +74,22 @@ function harness(options = {}) {
 
 const schoolReply = data => ({ ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data }) });
 
+for (const source of ["start", "tick"]) test(`${source} calls diagnostic hook only after unknown POST has stopped and persisted the fault`, async () => {
+  const order = [], reports = [];
+  const h = harness({ history: { get: async () => null, save: async () => {}, finish: async () => { order.push("persist"); } }, report: d => { reports.push(d); return d.reportId; } });
+  if (source === "tick") { await h.controller.start(8, 1, 1, { documentId: "doc" }); h.advance(60000); }
+  h.controller.api = createSchoolApi({ getToken: async () => "fake", switchRequestTimeoutMs: 5, clock: () => 1000000,
+    fetchImpl: async (url, options) => options.method === "POST" ? new Promise(() => {}) : schoolReply({ ac_status: { DisconnectRelay: source === "tick" } }) });
+  h.controller.onStopped = (d, failure) => {
+    assert.equal(h.run, null); assert.equal(h.alarms.size, 0); assert.equal(h.notice.outcomeUnknown, true);
+    assert.equal(order[0], "persist"); assert.equal(d.error.code, "E_API_TIMEOUT"); assert.equal(failure, null);
+    assert.equal(d.requests.find(r => r.method === "POST").dispatched, true); order.push("hook");
+  };
+  if (source === "start") await assert.rejects(h.controller.start(8, 1, 1, { documentId: "doc" }), { code: "E_API_TIMEOUT" });
+  else await h.controller.tick("run-1");
+  assert.deepEqual(order, ["persist", "hook"]); assert.equal(reports.length, 1);
+});
+
 for (const source of ["start", "tick", "initialize", "manualCheck", "keepAlive", "confirmation"]) {
   test(`${source} continues after one GET timeout without an interruption report or repeated POST`, async () => {
     const reports = [];

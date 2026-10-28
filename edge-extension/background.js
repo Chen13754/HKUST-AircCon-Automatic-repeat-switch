@@ -5,11 +5,12 @@ import { bounded, CycleError, describeError } from "./errors.js";
 import { ErrorReporter } from "./reports.js";
 import { createHistory } from "./history.js";
 import { Diagnostics } from "./diagnostics.js";
+import { CommandVerification } from "./command-verification.js";
 
 const HOME_PATH = "/njggt/app/home";
 const pageMessageTypes = new Set(["aircon:initialize", "aircon:getState", "aircon:start", "aircon:updateDurations", "aircon:stop", "aircon:manualCheck", "aircon:openReportSettings"]);
 const reportTabs = new Set();
-const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.19", userAgent: globalThis.navigator?.userAgent };
+const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.20", userAgent: globalThis.navigator?.userAgent };
 const reporter = new ErrorReporter({
   storage: chrome.storage.local,
   environment,
@@ -101,10 +102,12 @@ const page = {
       diagnostics.page({ at: Date.now(), tabId, route, frozen: tab.frozen, discarded: tab.discarded }, "tabSnapshot", { observer: "tabs" });
       diagnostics.event(signal?.diagnostic, { component: "page", step: "tabRead", outcome: "ok", elapsedMs: Date.now() - at });
       if (isAuthRoute(route)) {
+        if (signal?.diagnostic?.readOnlyVerification) throw new CycleError("E_AUTH", "只读核验时页面已进入认证流程。");
         // Do not await the controller queue from inside a control operation.
         controller.suspend(tabId, { event: "authentication", route, tabId }).catch(error => capture({ source: "recovery", tabId, error }));
         throw new CycleError("E_PAGE_RELOADING", "学校正在认证，等待返回主页后核验。");
       }
+      if (signal?.diagnostic?.readOnlyVerification && (tab.discarded || tab.frozen || tab.status === "loading")) throw new CycleError("E_PAGE_UNAVAILABLE", "核验页面不可用。");
       return isHome(tab.url);
     }
     catch (error) {
@@ -147,6 +150,32 @@ const controller = new CycleController({
     chrome.tabs.sendMessage(tabId, { type: "aircon:stateChanged" }).catch(() => {});
   }
 });
+
+const verificationApi = createSchoolApi({ getToken, diagnostics, retryGetTimeouts: false });
+const verification = new CommandVerification({
+  storage: chrome.storage.session,
+  alarm: {
+    create: (id, when) => chrome.alarms.create(`verification:${id}`, { when }),
+    clear: id => chrome.alarms.clear(`verification:${id}`)
+  },
+  readStatus: verificationApi.readStatus, readTimer: verificationApi.readTimer,
+  canVerify: async job => {
+    const [session, local] = await Promise.all([chrome.storage.session.get("cycleRun"), chrome.storage.local.get("cycleCheckpoint")]);
+    const checkpoint = local.cycleCheckpoint;
+    return !session.cycleRun && checkpoint?.active === false && checkpoint.run?.id === job.runId
+      && checkpoint.run?.documentId === job.documentId && checkpoint.notice?.outcomeUnknown === true
+      && checkpoint.command?.sent === true && checkpoint.command?.confirmed !== true;
+  },
+  updateReport: (id, value) => reporter.updateVerification(id, value),
+  interruptOrphans: id => reporter.interruptVerifications(id),
+  notify: tabId => { chrome.tabs.sendMessage(tabId, { type: "aircon:stateChanged" }).catch(() => {}); }
+});
+controller.verificationGeneration = tabId => verification.generationFor(tabId);
+controller.onStopped = (draft, failure) => {
+  if (!draft) return;
+  void verification.start({ ...draft, error: { code: draft.error.code, requestSequence: draft.error.requestSequence },
+    run: { ...draft.run }, command: { ...draft.command }, requests: structuredClone(draft.requests) }, failure);
+};
 
 // Reconcile before control/state events. A delivered one-shot cycle alarm is
 // already consumed, so recognize its ID and scheduled time during reconciliation.
@@ -236,6 +265,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   (async () => {
+    if (["aircon:stop", "aircon:start", "aircon:manualCheck", "aircon:updateDurations"].includes(message.type)) await verification.cancel(tabId);
+    else await verification.ready();
+    if (message.type === "aircon:initialize" && verification.job?.tabId === tabId && verification.job.documentId !== options.documentId) await verification.cancel(tabId, "page_changed");
     if (message?.type !== "aircon:stop") await ensureReady();
     switch (message?.type) {
       case "aircon:initialize":
@@ -265,7 +297,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       default:
         throw new Error("未知扩展操作。");
     }
-    return { ...await controller.getView(tabId), reports: { ...reporter.state } };
+    return { ...await controller.getView(tabId), postCommandVerification: verification.view(tabId), reports: { ...reporter.state } };
   })().then(view => sendResponse({ ok: true, view }))
     .catch(async error => {
       if (!error?.reportId) capture({ ...options, source: message?.type?.replace("aircon:", ""), error });
@@ -276,6 +308,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener(item => {
+  if (item.name.startsWith("verification:")) { void verification.onAlarm(item.name.slice("verification:".length), item.scheduledTime); return; }
   if (/^(cycle|keepalive|recovery):/.test(item.name)) diagnostics.event(null, { component: "alarm", step: "alarmDelivered", scheduledAt: item.scheduledTime, latenessMs: Date.now() - item.scheduledTime, outcome: "ok" });
   if (item.name.startsWith("recovery:")) {
     const id = item.name.slice("recovery:".length);
@@ -291,6 +324,7 @@ chrome.alarms.onAlarm.addListener(item => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  void verification.cancel(tabId, "page_closed");
   if (reportTabs.has(tabId)) { diagnostics.event(null, { tabId, component: "page", step: "closed", outcome: "ok" }); diagnostics.flush(); }
   reportTabs.delete(tabId);
   // Cancel immediately even while startup reconciliation is pending.
@@ -303,6 +337,7 @@ chrome.storage.onChanged?.addListener((changes, area) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const route = pageRoute(changeInfo.url ?? tab?.url);
+  if (changeInfo.status === "loading" || changeInfo.discarded === true || changeInfo.url && !isHome(changeInfo.url)) void verification.cancel(tabId, "page_changed");
   if ((reportTabs.has(tabId) || route !== "other") && (changeInfo.status || changeInfo.url || typeof changeInfo.discarded === "boolean" || typeof changeInfo.frozen === "boolean")) {
     diagnostics.page({ at: Date.now(), tabId, route, frozen: tab?.frozen, discarded: tab?.discarded }, changeInfo.status === "loading" ? "loading" : changeInfo.url ? "navigation" : "tabSnapshot", { observer: "tabs" });
   }
@@ -325,6 +360,7 @@ try {
   for (const name of ["onBeforeNavigate", "onCommitted", "onHistoryStateUpdated", "onCompleted", "onErrorOccurred"]) {
     chrome.webNavigation[name].addListener(details => {
       if (details.frameId !== 0) return;
+      if (name === "onBeforeNavigate" || name === "onHistoryStateUpdated" && !isHome(details.url)) void verification.cancel(details.tabId, "page_changed");
       diagnostics.page({ at: details.timeStamp, tabId: details.tabId, documentId: details.documentId, route: pageRoute(details.url) },
         name === "onBeforeNavigate" ? "loading" : "navigation", { observer: "webNavigation", navigationEvent: name, navigationError: details.error, transitionType: details.transitionType, qualifiers: details.transitionQualifiers });
       if (name === "onHistoryStateUpdated" && isHome(details.url)) chrome.tabs.sendMessage(details.tabId, { type: "aircon:pageReturned" }, details.documentId ? { documentId: details.documentId } : { frameId: 0 }).catch(() => {});
@@ -334,8 +370,10 @@ try {
 } catch { diagnostics.coverage.webNavigation = false; }
 
 chrome.runtime.onStartup?.addListener(() => {
+  void verification.cancel(null, "session_ended");
   ensureReady().catch(error => { capture({ source: "reconcile", error }); console.error("AC startup reconciliation failed", error); });
 });
+chrome.runtime.onInstalled?.addListener(() => { void verification.cancel(null, "session_ended"); });
 
 for (const type of ["error", "unhandledrejection"]) globalThis.addEventListener?.(type, event => {
   const error = event.error ?? event.reason;

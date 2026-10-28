@@ -13,6 +13,7 @@ function restoreReport(report, snapshotOrigin = report.snapshotOrigin) {
     manualCheck: report.manualCheck, lifecycle: report.lifecycle,
     diagnostics: report.diagnostics,
     run: report.cycle, durations: report.requestedDurations, timingChange: report.timingChange, queryRecovery: report.queryRecovery,
+    postCommandVerification: report.postCommandVerification,
     lastConfirmedStatus: report.lastConfirmedStatus, requests: report.requests,
     command: report.switchCommand, snapshotOrigin,
     outcomeUnknown: report.outcomeUnknown, cachedAt: report.page?.cachedAt, visibility: report.page?.visibility
@@ -79,6 +80,37 @@ export class ErrorReporter {
       const report = restoreReport({ ...entry.report, diagnostics: format.mergeDiagnostics(entry.report.diagnostics, clean, entry.report.operation.originalOperationId ?? reportId) });
       await this.local(() => this.storage.set({ [key]: { report, saved: false } }));
     }).then(() => this.flush());
+  }
+
+  async updateVerification(reportId, value) {
+    const clean = format.postCommandVerification(value);
+    if (!clean || clean.reportId !== reportId) return false;
+    // Drain initial captures before enriching; never recreate an evicted report.
+    for (const pending of this.pendingReports.filter(r => r.reportId === reportId)) await this.persist(pending);
+    const updated = await this.cache(async () => {
+      const key = format.key(reportId);
+      const entry = (await this.local(() => this.storage.get(key)))[key];
+      if (!entry || entry.report.snapshotOrigin !== "background") return false;
+      // Reject a stale session job too: a late session write must never revive
+      // observation after a newer terminal result was saved locally.
+      if ((entry.report.postCommandVerification?.revision ?? -1) >= (clean.revision ?? 0)) return false;
+      const report = restoreReport({ ...entry.report, postCommandVerification: clean });
+      await this.local(() => this.storage.set({ [key]: { report, saved: false } }));
+      return true;
+    });
+    this.flush();
+    return updated;
+  }
+
+  async interruptVerifications(exceptId) {
+    const data = await this.local(() => this.storage.get(null));
+    for (const [key, entry] of Object.entries(data)) {
+      if (!format.isKey(key) || entry.report?.reportId === exceptId) continue;
+      const value = entry.report?.postCommandVerification;
+      if (!value || !["pending", "running", "waiting"].includes(value.state)) continue;
+      await this.updateVerification(entry.report.reportId, { ...value, revision: (value.revision ?? 0) + 1,
+        state: "interrupted", reason: "session_ended", endedAt: Date.now() });
+    }
   }
 
   flush() {

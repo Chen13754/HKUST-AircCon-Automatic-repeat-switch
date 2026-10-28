@@ -2,7 +2,7 @@ import { API_BASE } from "./api-config.js";
 import { timerFromSchoolData } from "./cycle.js";
 import { bounded, CycleError } from "./errors.js";
 
-export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs = 8000, switchRequestTimeoutMs = 15000, diagnostics, performanceImpl = globalThis.performance, clock = () => Date.now() }) {
+export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs = 8000, switchRequestTimeoutMs = 15000, retryGetTimeouts = true, diagnostics, performanceImpl = globalThis.performance, clock = () => Date.now() }) {
   let sequence = 0;
   const monotonic = () => performanceImpl?.now?.() ?? Date.now();
   const event = (context, trace, step) => { try { diagnostics?.requestEvent(context, trace, step); } catch { /* Best effort. */ } };
@@ -11,7 +11,7 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
       signal?.throwIfAborted();
       try { return await requestOnce(tabId, path, method, body, signal, attempt, validate); }
       catch (error) {
-        if (method !== "GET" || error.code !== "E_API_TIMEOUT" || attempt === 2) throw error;
+        if (!retryGetTimeouts || method !== "GET" || error.code !== "E_API_TIMEOUT" || attempt === 2) throw error;
         // A fresh attempt reads the current token and gets its own I/O deadline.
         // Parent cancellation and the operation deadline still take precedence.
         signal?.throwIfAborted();
@@ -54,6 +54,9 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
         };
         requestSignal.addEventListener("abort", onAbort, { once: true });
         requestSignal.throwIfAborted();
+        if (context?.readOnlyVerification && clock() >= context.readDeadlineAt) {
+          throw new CycleError("E_OPERATION_TIMEOUT", "只读核验已到期限，不再发送查询。");
+        }
         if (method === "POST" && context?.dispatchDeadlineAt !== undefined && clock() >= context.dispatchDeadlineAt) {
           throw new CycleError("E_QUERY_RECOVERY_TIMEOUT", "查询恢复已到期限，不再发送开关指令。");
         }

@@ -10,6 +10,43 @@ const format = globalThis.AirconReportFormat;
 const environment = { version: "1.1.5", userAgent: "Chrome/140.0.0.0 Edg/140.0.1.2" };
 const draft = (id = "report-1", at = 1000) => ({ reportId: id, at, startedAt: at - 100, source: "manualCheck", error: { code: "E_HTTP" } });
 
+test("post-command verification enriches the same report across export, restart and concurrent diagnostics without changing the fault", async () => {
+  const h = harness(); h.permission = "prompt";
+  h.reporter.capture({ ...draft(), error: { code: "E_API_TIMEOUT" }, outcomeUnknown: true,
+    command: { desiredOn: true, sent: true, confirmed: false }, requests: [{ sequence: 3, method: "POST", phase: "headers", errorCode: "E_API_TIMEOUT" }] });
+  await h.reporter.queue;
+  const original = structuredClone(h.data[format.key("report-1")].report);
+  const value = { reportId: "report-1", revision: 2, state: "completed", conclusion: "changed", secret: "SECRET",
+    rounds: [{ actualOn: false, timerPresent: false }, { actualOn: true, timerPresent: true, requests: [{ sequence: 2, method: "GET", path: "/app/prepaid/ac-status", body: "SECRET" }] }] };
+  await Promise.all([h.reporter.updateVerification("report-1", value), h.reporter.enrich("report-1", { revision: 3, site: { observedOn: true, at: 2000 } })]);
+  assert.equal(await h.reporter.updateVerification("report-1", { ...value, revision: 1, state: "waiting" }), false);
+  assert.equal(await h.reporter.updateVerification("report-1", { ...value, revision: 2, state: "running" }), false);
+  h.permission = "granted"; await new ErrorReporter(h.deps).flush();
+  const saved = h.writes.at(-1).report;
+  assert.deepEqual(saved.requests, original.requests); assert.deepEqual(saved.error, original.error);
+  assert.equal(saved.outcomeUnknown, true); assert.equal(saved.switchCommand.confirmed, false);
+  assert.equal(saved.postCommandVerification.conclusion, "changed"); assert.equal(saved.postCommandVerification.state, "completed");
+  assert.equal(saved.postCommandVerification.rounds[1].requests[0].sequence, 2);
+  assert.equal(JSON.stringify(saved).includes("SECRET"), false);
+  assert.equal(Object.values(h.data).filter(v => v.report).length, 1);
+  assert.equal(await h.reporter.updateVerification("evicted", { ...value, reportId: "evicted" }), false);
+  const fallback = format.makeReport({ ...draft(), source: "pageCommunication", snapshotOrigin: "page-cache", postCommandVerification: value });
+  assert.equal(fallback.postCommandVerification.conclusion, "changed");
+  assert.equal(format.makeReport(draft()).postCommandVerification, null);
+  const large = format.postCommandVerification({ ...value, rounds: Array.from({ length: 20 }, () => ({ requests: Array.from({ length: 20 }, () => ({})) })) });
+  assert.equal(large.rounds.length, 2); assert.ok(large.rounds.every(r => r.requests.length === 2));
+});
+
+test("orphaned verification is marked interrupted when its session job is missing", async () => {
+  const h = harness(); h.permission = "prompt";
+  h.reporter.capture({ ...draft(), postCommandVerification: { reportId: "report-1", revision: 1, state: "waiting", rounds: [] } });
+  await h.reporter.queue;
+  await h.reporter.interruptVerifications("report-1");
+  assert.equal(h.data[format.key("report-1")].report.postCommandVerification.state, "waiting");
+  await h.reporter.interruptVerifications(null);
+  assert.equal(h.data[format.key("report-1")].report.postCommandVerification.reason, "session_ended");
+});
+
 test("query recovery and cancellation evidence survive cache, restart, export and fallback sanitization", async () => {
   const h = harness(); h.permission = "prompt";
   const queryRecovery = { id: "initial", initialOperationId: "tick-op", startedAt: 1000, originalNextAt: 900, deadline: 60900,

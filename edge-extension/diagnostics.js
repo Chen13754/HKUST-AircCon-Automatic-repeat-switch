@@ -1,5 +1,6 @@
 import "./report-format.js";
 import { bounded } from "./errors.js";
+import { observeFollowup } from "./incident-followup.js";
 
 const format = globalThis.AirconReportFormat;
 const JOURNAL_KEY = "airconDiagnosticJournal";
@@ -21,8 +22,11 @@ export function timingFromEntry(entry, timeOrigin) {
 // only allowlisted school endpoints. Page-world bodies are reduced to numeric
 // business codes before crossing into the extension; headers are never read.
 export class Diagnostics {
-  constructor({ storage, runtimeId, clock = () => Date.now(), onUpdate = () => {}, onIncident = () => {}, timeoutMs = 500 }) {
+  constructor({ storage, sessionStorage, followupAlarm, followupCanStart = async () => true, onFollowup = async () => true, onOrphanFollowups = async () => {}, runtimeId, clock = () => Date.now(), onUpdate = () => {}, onIncident = () => {}, timeoutMs = 500 }) {
     Object.assign(this, { storage, runtimeId, clock, onUpdate, onIncident, timeoutMs });
+    Object.assign(this, { sessionStorage, followupAlarm, followupCanStart, onFollowup, onOrphanFollowups });
+    this.followups = new Map();
+    this.followupUpdates = Promise.resolve();
     this.worker = { id: format.newId(), startedAt: clock() };
     this.events = []; this.network = []; this.site = null;
     this.sites = new Map(); this.lifecycleEvents = []; this.pageResponses = [];
@@ -57,6 +61,19 @@ export class Diagnostics {
       }
       this.coverage.journal = "ready";
       this.coverage.historyLoaded = true;
+      if (this.sessionStorage) {
+        const saved = (await bounded(() => this.sessionStorage.get("incidentFollowups"), { ms: this.timeoutMs })).incidentFollowups ?? [];
+        for (const item of saved.slice(-20)) {
+          const state = format.incidentFollowup(item);
+          if (state?.state === "observing") this.followups.set(state.tabId, state);
+        }
+        await this.onOrphanFollowups([...this.followups.values()].map(s => s.reportId));
+        for (const state of this.followups.values()) {
+          if (!await this.followupCanStart(state)) this.closeFollowup(state.tabId, "new-cycle");
+          else if (this.clock() >= state.deadlineAt) this.closeFollowup(state.tabId, "expired");
+          else { this.publishFollowup(state); await this.followupAlarm?.create(state.reportId, state.deadlineAt); }
+        }
+      }
       // A new worker can receive the return navigation before hydration ends.
       // Enrich once after loading links, using a revision newer than the old worker.
       for (const [id, meta] of this.reports) {
@@ -151,6 +168,56 @@ export class Diagnostics {
     this.flush();
   }
 
+  async startFollowup(draft) {
+    if (!draft?.queryRecovery?.endedAt || draft.command?.sent || !["stopped", "cancelled"].includes(draft.queryRecovery.outcome)) return;
+    await this.ready;
+    if (!await this.followupCanStart({ runId: draft.run.id, tabId: draft.run.tabId })) return;
+    this.closeFollowup(draft.run.tabId, "superseded");
+    const initial = draft.queryRecovery.initialFailure;
+    const failed = draft.requests?.find(r => Number.isSafeInteger(draft.error?.requestSequence) && r.sequence === draft.error.requestSequence && r.errorCode === draft.error.code)
+      ?? draft.queryRecovery.rounds[0]?.requests.find(r => Number.isSafeInteger(initial?.sequence) && r.sequence === initial.sequence && r.errorCode === initial.errorCode);
+    const state = { reportId: draft.reportId, runId: draft.run.id, tabId: draft.run.tabId, documentId: draft.run.documentId, startedAt: this.clock(), deadlineAt: this.clock() + 900000,
+      revision: 0, state: "observing", conclusion: "unknown", failurePath: failed?.path ?? draft.queryRecovery.initialFailure?.path,
+      failureStartedAt: failed?.startedAt ?? null, switches: [], queries: [],
+      coverage: { observerReady: this.sites.get(draft.run.tabId)?.responseObserver ?? null, receivedCount: 0, browserCompletions: 0, businessEvidenceMissing: null } };
+    this.followups.set(state.tabId, state);
+    while (this.followups.size > 20) this.closeFollowup(this.followups.keys().next().value, "superseded");
+    this.publishFollowup(state);
+    try { await this.followupAlarm?.create(state.reportId, state.deadlineAt); } catch { this.closeFollowup(state.tabId, "storage-failure"); }
+    this.flush();
+  }
+  publishFollowup(state) {
+    state.revision++;
+    const snapshot = format.incidentFollowup(state);
+    this.followupUpdates = this.followupUpdates.then(() => this.onFollowup(state.reportId, snapshot)).then(ok => {
+      if (ok === false && this.followups.get(state.tabId) === state) this.closeFollowup(state.tabId, "storage-failure");
+    }).catch(() => { if (this.followups.get(state.tabId) === state) this.closeFollowup(state.tabId, "storage-failure"); });
+  }
+  closeFollowup(tabId, reason) {
+    const state = this.followups.get(tabId);
+    if (!state) return;
+    this.followups.delete(tabId);
+    state.state = "ended"; state.reason = reason; state.endedAt = reason === "expired" ? state.deadlineAt : this.clock();
+    this.publishFollowup(state);
+    Promise.resolve(this.followupAlarm?.clear(state.reportId)).catch(() => {});
+    this.flush();
+  }
+  async endFollowup(tabId, reason) {
+    await this.ready;
+    if (tabId === null) for (const id of [...this.followups.keys()]) this.closeFollowup(id, reason);
+    else this.closeFollowup(tabId, reason);
+  }
+  passiveEvidence(value, business = false) {
+    const state = this.followups.get(value.tabId);
+    if (!state) return;
+    if (!["/app/prepaid/ac-status", "/app/prepaid/ac-timer", "/app/prepaid/toggle-status"].includes(value.path)) return;
+    if (this.clock() >= state.deadlineAt) { this.closeFollowup(value.tabId, "expired"); return; }
+    if (business) { state.coverage.receivedCount++; state.coverage.lastResponseAt = this.clock(); }
+    else state.coverage.browserCompletions++;
+    state.coverage.businessEvidenceMissing = state.coverage.browserCompletions > state.coverage.receivedCount;
+    if (observeFollowup(state, value)) { this.publishFollowup(state); this.flush(); }
+  }
+
   changed(operationId, tabId = null) {
     this.revision++;
     for (const [id, meta] of this.reports) {
@@ -173,6 +240,7 @@ export class Diagnostics {
           reportLinks: [...this.reports].filter(([, meta]) => this.clock() - meta.at <= 60_000).map(([id, meta]) => ({ id, ...meta })),
           unfinishedOperations: [...this.previousUnfinished, ...this.inflight.values()].slice(-8) };
         await bounded(() => this.storage.set({ [JOURNAL_KEY]: structuredClone(value) }), { ms: this.timeoutMs });
+        if (this.sessionStorage) await bounded(() => this.sessionStorage.set({ incidentFollowups: [...this.followups.values()].map(format.incidentFollowup) }), { ms: this.timeoutMs });
         this.coverage.journal = "ready";
       }
     }).catch(() => {
@@ -218,6 +286,7 @@ export class Diagnostics {
     if (Number.isInteger(details.statusCode)) record.httpStatus = details.statusCode;
     if (typeof details.fromCache === "boolean") record.fromCache = details.fromCache;
     if (["completed", "error"].includes(event)) { record.endedAt = details.timeStamp; record.error = format.networkRecord({ error: details.error }).error; }
+    if (record.owner === "page" && ["completed", "error"].includes(event)) this.passiveEvidence(record);
     this.changed(record.operationId, record.tabId);
     if (["error", "completed"].includes(event) || record.owner === "extension" && event === "beforeRequest") this.flush();
   }
@@ -250,6 +319,7 @@ export class Diagnostics {
       && (!item.documentId || !clean.documentId || item.documentId === clean.documentId) && Math.abs(item.startedAt - clean.startedAt) < 250);
     clean.correlation = matches.length === 1 ? "unique" : matches.length ? "ambiguous" : "unmatched";
     clean.browserRequestId = matches.length === 1 ? matches[0].id : null;
+    if (clean.correlation === "unique") this.passiveEvidence(clean, true);
     this.pageResponses.push(clean); if (this.pageResponses.length > 64) this.pageResponses.shift();
     this.changed(null, clean.tabId);
     this.flush();

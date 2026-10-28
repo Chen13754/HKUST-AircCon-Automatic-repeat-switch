@@ -5,6 +5,20 @@ import { readFileSync } from "node:fs";
 
 const read = name => readFileSync(new URL(`../${name}.js`, import.meta.url), "utf8");
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test("page summaries expose only exact switch acknowledgement and typed actual state", () => {
+  const h = harness();
+  const cases = [
+    ["POST", "toggle-status", { meta: { code: 200 }, data: { ac_toggle: { Message: "Execution succeeded" }, token: "SECRET" } }, true],
+    ["POST", "toggle-status", { meta: { code: 200 }, data: { ac_toggle: { Message: "Rejected SECRET" } } }, false],
+    ["POST", "toggle-status", { meta: { code: 200 } }, null]
+  ];
+  for (const [method, path, body] of cases) { const x = new h.XHR(); x.open(method, `https://w5.ab.ust.hk/njggt/api/app/prepaid/${path}`); x.send(); x.respond(JSON.stringify(body)); }
+  const x = new h.XHR(); x.open("GET", url); x.send(); x.respond(JSON.stringify({ meta: { code: 200 }, data: { ac_status: { DisconnectRelay: false } } }));
+  const responses = h.messages.filter(m => m.kind === "response").map(m => m.response);
+  assert.deepEqual(responses.slice(0, 3).map(r => r.switchAccepted), [true, false, null]);
+  assert.equal(responses[3].actualOn, false); assert.equal(JSON.stringify(responses).includes("SECRET"), false);
+});
 const url = "https://w5.ab.ust.hk/njggt/api/app/prepaid/ac-status";
 function harness({ bridgeFirst = true, fetchImpl } = {}) {
   const listeners = new Map(), messages = [], events = [];

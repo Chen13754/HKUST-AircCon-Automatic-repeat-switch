@@ -7,7 +7,91 @@ import { createHistory } from "../history.js";
 import { memoryStorage } from "./storage-fixture.js";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
-function harness() {
+
+for (const phase of ["on", "off"]) test(`v2 ${phase}: timeout then HTTP 502 then recovery after minutes preserves one switch`, async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(phase), posts = h.posts.length;
+  const q = structuredClone(h.run.queryRecovery), original = h.api.readTimer;
+  assert.equal(q.policyVersion, 2); assert.equal(q.deadline, before.nextAt + 300000);
+  assert.deepEqual(q.attemptTimes, [30,60,120,180,240].map(s => q.startedAt + s * 1000));
+  h.api.readTimer = async (_tab, signal) => {
+    const e = new CycleError("E_HTTP", "simulated"); e.requestSequence = 7;
+    signal.diagnostic.requests.push({ sequence: 7, method: "GET", path: "/app/prepaid/ac-timer", errorCode: "E_HTTP", httpStatus: 502 }); throw e;
+  };
+  for (const index of [0,1,2]) { h.at(q.attemptTimes[index]); await h.controller.recoveryExpired(before.id, h.run.recovery.nextAttemptAt); assert.equal(h.reports.length, 1); }
+  h.api.readTimer = original; h.at(q.attemptTimes[3]);
+  await Promise.all([h.controller.recoveryExpired(before.id, h.run.recovery.nextAttemptAt), h.controller.recoveryExpired(before.id, h.run.recovery.nextAttemptAt)]);
+  assert.equal(h.posts.length, posts + 1); assert.equal(h.run.id, before.id); assert.equal(h.run.phaseStartedAt, h.now());
+  assert.equal(h.run.phase, phase === "on" ? "off" : "on"); assert.equal(h.reports.length, 2);
+  assert.equal(h.reports[1].queryRecovery.rounds.length, 5); assert.equal(h.reports[1].queryRecovery.outcome, "recovered");
+  assert.equal(h.reports[1].queryRecovery.initialFailure.errorCode, "E_API_TIMEOUT");
+});
+test("v2 exhausts all five delayed rounds without extending the deadline or reporting each retry", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(); const q = structuredClone(h.run.queryRecovery);
+  h.api.readStatus = async () => { throw new CycleError("E_API_TIMEOUT", "simulated"); };
+  for (const at of q.attemptTimes) { h.at(at); await h.controller.recoveryExpired(before.id, h.run.recovery.nextAttemptAt); }
+  assert.equal(h.run, null); assert.equal(h.posts.length, 0); assert.equal(h.reports.length, 2);
+  assert.equal(h.reports[1].queryRecovery.rounds.length, 6); assert.equal(h.reports[1].queryRecovery.deadline, q.deadline);
+});
+for (const lateness of [60001, 300000]) test(`v2 cannot enter recovery after first fault at +${lateness}`, async () => {
+  const h = harness({ modern: true }); await h.startRecovery("on", lateness);
+  assert.equal(h.run, null); assert.equal(h.posts.length, 0);
+});
+test("v2 late alarm consumes one due slot and skips earlier slots", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(), q = h.run.queryRecovery;
+  h.at(q.attemptTimes[3]); await h.controller.recoveryExpired(before.id, q.nextAttemptAt);
+  assert.equal(h.posts.length, 1); assert.deepEqual(h.reports.at(-1).queryRecovery.skippedAttempts, [0,1,2]);
+  assert.equal(h.reports.at(-1).queryRecovery.rounds.length, 2);
+});
+test("v2 cold worker retires a claimed unfinished round and waits for a future slot", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery();
+  const run = structuredClone(h.run); run.queryRecovery.nextSlot = 1;
+  run.queryRecovery.rounds.push({ operationId: "lost-worker", startedAt: run.queryRecovery.nextAttemptAt, scheduledAt: run.queryRecovery.nextAttemptAt, endedAt: null });
+  await h.store.setRun(run); await h.history.save(run); h.at(run.queryRecovery.nextAttemptAt + 1000);
+  const cold = h.make(); await cold.reconcile();
+  assert.equal(h.run.queryRecovery.rounds.at(-1).outcome, "interrupted"); assert.equal(h.run.queryRecovery.nextAttemptAt, run.queryRecovery.attemptTimes[1]);
+  assert.equal(h.posts.length, 0);
+  h.at(h.run.recovery.nextAttemptAt); await cold.recoveryExpired(before.id, h.run.recovery.nextAttemptAt); assert.equal(h.posts.length, 1);
+});
+test("a recovery alarm can wake a cold worker without first replaying reconciliation", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery();
+  const run = structuredClone(h.run); run.queryRecovery.nextSlot = 1;
+  run.queryRecovery.rounds.push({ operationId: "lost-round", startedAt: run.queryRecovery.nextAttemptAt, endedAt: null });
+  await h.store.setRun(run); await h.history.save(run); h.at(run.queryRecovery.nextAttemptAt + 1);
+  await h.make().recoveryExpired(before.id, run.queryRecovery.nextAttemptAt);
+  assert.equal(h.posts.length, 0); assert.equal(h.run.queryRecovery.rounds.at(-1).outcome, "interrupted");
+  assert.equal(h.run.recovery.nextAttemptAt, run.queryRecovery.attemptTimes[1]);
+});
+for (const code of ["E_AUTH", "E_STATUS_FORMAT", "E_API_REJECTED", "E_NETWORK"]) test(`v2 ${code} stops immediately`, async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(); h.at(h.run.recovery.nextAttemptAt);
+  h.api.readTimer = async () => { throw new CycleError(code, "simulated"); };
+  await h.controller.recoveryExpired(before.id); assert.equal(h.run, null); assert.equal(h.posts.length, 0);
+});
+test("native browser control cancels waiting recovery and an old document cannot cancel it", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery();
+  await h.controller.externalControl(8, "old-document"); assert.ok(h.run);
+  await h.controller.externalControl(8, "doc-1"); assert.equal(h.run, null);
+  assert.equal(h.reports.at(-1).queryRecovery.stopReason, "page-control"); assert.equal(h.posts.length, 0);
+  await h.controller.recoveryExpired(before.id); assert.equal(h.posts.length, 0);
+});
+test("native control invalidates a queued recovery before it can issue requests", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(); h.at(h.run.recovery.nextAttemptAt);
+  let release; const blocked = h.controller.enqueue(() => new Promise(resolve => { release = resolve; })); await flush();
+  const retry = h.controller.recoveryExpired(before.id).catch(e => e); await flush();
+  const external = h.controller.externalControl(8, "doc-1"); release(); await blocked; await retry; await external;
+  assert.equal(h.posts.length, 0); assert.equal(h.run, null);
+});
+for (const offset of [299999, 300000, 300001]) test(`v2 absolute deadline at +${offset}`, async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery();
+  h.at(before.nextAt + offset); await h.controller.recoveryExpired(before.id, h.run.recovery.nextAttemptAt);
+  assert.equal(h.posts.length, offset < 300000 ? 1 : 0);
+});
+test("v2 unknown POST never schedules another recovery round", async () => {
+  const h = harness({ modern: true }), before = await h.startRecovery(); h.at(h.run.recovery.nextAttemptAt);
+  h.api.setStatus = async (_tab, _desired, signal) => { signal.diagnostic.command.sent = true; h.posts.push(false); throw new CycleError("E_API_TIMEOUT", "unknown"); };
+  await h.controller.recoveryExpired(before.id); assert.equal(h.posts.length, 1); assert.equal(h.run, null);
+  await h.controller.recoveryExpired(before.id); assert.equal(h.posts.length, 1);
+});
+function harness({ modern = false } = {}) {
   let now = 1_000_000, actual = true, run = null, notice = null, count = 0;
   const local = {}, posts = [], reads = [], reports = [], alarms = new Map(), recovery = new Map(), keepalive = new Map();
   const area = memoryStorage(local), history = createHistory(area);
@@ -17,9 +101,10 @@ function harness() {
   const adapter = map => ({ get: async id => map.get(id), create: async (id, when) => map.set(id, { scheduledTime: when }), clear: async id => map.delete(id) });
   const api = { readTimer: async () => { reads.push("timer"); return null; }, readStatus: async () => { reads.push("status"); return actual; },
     setStatus: async (_tab, desired, signal) => { assert.ok(local.cycleCheckpoint.command.sent); signal.diagnostic.command.sent = true; posts.push(desired); actual = desired; } };
-  const make = () => new CycleController({ store, history, api, page: { isOpen: async () => true },
+  const make = () => { const controller = new CycleController({ store, history, api, page: { isOpen: async () => true },
     alarm: adapter(alarms), recoveryAlarm: adapter(recovery), keepAliveAlarm: adapter(keepalive), clock: () => now, id: () => `run-${++count}`,
     report: draft => { reports.push(globalThis.AirconReportFormat.makeReport(draft)); return draft.reportId; } });
+    controller.queryRecoveryPolicyVersion = modern ? 2 : 1; return controller; };
   const controller = make();
   const startRecovery = async (phase = "on", delay = 16000) => {
     await controller.start(8, 1, 10, { documentId: "doc-1" });

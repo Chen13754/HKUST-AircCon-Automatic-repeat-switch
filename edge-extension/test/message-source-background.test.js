@@ -39,7 +39,7 @@ async function harness(t) {
   let listener;
   const storage = (data, countReads = false) => ({
     get: async key => {
-      if (countReads) stats.sessionReads++;
+      if (countReads && key !== "incidentFollowups") stats.sessionReads++;
       return structuredClone(key === null ? data : Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, data[name]])));
     },
     set: async values => Object.assign(data, structuredClone(values)),

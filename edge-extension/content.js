@@ -110,13 +110,14 @@
         reportId, startedAt, source: "pageCommunication", error,
         run: view.run, snapshotOrigin: "page-cache", outcomeUnknown: true,
         postCommandVerification: view.postCommandVerification,
+        incidentFollowup: view.incidentFollowup,
         cachedAt, visibility: document.visibilityState, durations, manualCheck,
         timingChange: timingRequest ? { at: startedAt, runId: timingRequest.runId, expectedRevision: timingRequest.timingRevision,
           requested: durations, before: view.run ? { onMinutes: view.run.onMinutes, offMinutes: view.run.offMinutes } : null,
           phase: view.run?.phase, phaseStartedAt: view.run?.phaseStartedAt, previousNextAt: view.run?.nextAt, outcome: "unknown" } : undefined,
         diagnostics: { coverage: { journal: "unavailable" }, site: pageEvidence(), events: pageEvents, network: pageResources },
         communication: { messageType, reason: error.communicationReason, tabIsHome: isHome() }
-      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.20", userAgent: globalThis.navigator?.userAgent });
+      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.21", userAgent: globalThis.navigator?.userAgent });
       chrome.storage.local.set({ [format.fallbackKey(report.reportId)]: { report, saved: false } }).then(async () => {
         reportStatus = { phase: "cached", pending: 1 };
         render();
@@ -303,7 +304,7 @@
       text = `${states[verification.state] ?? "只读核验"}：${conclusions[verification.conclusion] ?? conclusions.unknown}。学校定时器：${timer === true ? "存在" : timer === false ? "未检测到" : "未知"}。这不能确认原指令成功，循环保持停止，请自行确认状态后点击停止。`;
     }
     else if (needsConfirmation) text = "操作结果未确认，请先确认学校页面的空调状态，再点击停止。";
-    else if (run?.queryRecovery) text = `${run.queryRecovery.initialFailure?.errorCode === "E_HTTP" ? `学校接口暂时异常（HTTP ${run.queryRecovery.initialFailure.httpStatus ?? "未知"}）` : run.queryRecovery.initialFailure?.errorCode === "E_API_TIMEOUT" ? "查询超时" : "查询暂时异常"}，${run.recovery?.kind === "authentication" ? "等待学校认证恢复" : loading || run.recovery?.kind === "reload" ? "等待页面恢复" : "等待重新核验"}；恢复期限还剩 ${Math.max(0, Math.ceil((run.queryRecovery.deadline - Date.now()) / 1000))} 秒，停止仍可取消。`;
+    else if (run?.queryRecovery) text = `${run.queryRecovery.initialFailure?.errorCode === "E_HTTP" ? `学校接口暂时异常（HTTP ${run.queryRecovery.initialFailure.httpStatus ?? "未知"}）` : run.queryRecovery.initialFailure?.errorCode === "E_API_TIMEOUT" ? "查询超时" : "查询暂时异常"}，${run.recovery?.kind === "authentication" ? "等待学校认证恢复" : loading || run.recovery?.kind === "reload" ? "等待页面恢复" : "等待重新核验"}；恢复期限还剩 ${Math.max(0, Math.ceil((run.queryRecovery.deadline - Date.now()) / 1000))} 秒，停止仍可取消。${run.queryRecovery.policyVersion === 2 ? `下一轮约 ${Math.max(0, Math.ceil((run.queryRecovery.nextAttemptAt - Date.now()) / 1000))} 秒后，最晚 ${new Date(run.queryRecovery.deadline).toLocaleTimeString()} 结束。当前状态可能多保持几分钟。` : ""}`;
     else if (run?.recovery?.kind === "authentication") text = "学校认证恢复中，暂不切换空调；最多等待 60 秒，返回后核验并接续原计划。";
     else if (loading || run?.recovery) text = "正在核验页面与原循环，请稍候；停止仍可取消循环。";
     else if (run) {

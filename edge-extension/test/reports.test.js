@@ -10,6 +10,21 @@ const format = globalThis.AirconReportFormat;
 const environment = { version: "1.1.5", userAgent: "Chrome/140.0.0.0 Edg/140.0.1.2" };
 const draft = (id = "report-1", at = 1000) => ({ reportId: id, at, startedAt: at - 100, source: "manualCheck", error: { code: "E_HTTP" } });
 
+test("slow export cannot replace a newer passive supplement with the old exported snapshot", async () => {
+  let release, started;
+  const entered = new Promise(resolve => { started = resolve; });
+  const writes = [], h = harness({ writeFile: async (_dir, report) => {
+    writes.push(report);
+    if (writes.length === 1) { started(); await new Promise(resolve => { release = resolve; }); }
+  } });
+  h.reporter.capture(draft()); await entered;
+  await h.reporter.updateFollowup("report-1", { reportId: "report-1", revision: 1, state: "ended", reason: "expired", conclusion: "switch-only-success", switches: [], queries: [] });
+  release(); await h.reporter.queue;
+  assert.equal(h.data[format.key("report-1")].report.incidentFollowup.revision, 1);
+  assert.equal(h.data[format.key("report-1")].saved, true);
+  assert.equal(writes.at(-1).incidentFollowup.conclusion, "switch-only-success");
+});
+
 test("post-command verification enriches the same report across export, restart and concurrent diagnostics without changing the fault", async () => {
   const h = harness(); h.permission = "prompt";
   h.reporter.capture({ ...draft(), error: { code: "E_API_TIMEOUT" }, outcomeUnknown: true,

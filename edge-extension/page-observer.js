@@ -27,7 +27,10 @@
   }
   function summarize(record, status, value, result = "json") {
     emit({ kind: "response", response: { ...record, endedAt: Date.now(), httpStatus: status,
-      schoolCode: Number.isSafeInteger(value?.meta?.code) ? value.meta.code : null, result } });
+      schoolCode: Number.isSafeInteger(value?.meta?.code) ? value.meta.code : null, result,
+      switchAccepted: record.method === "POST" && record.path === "/app/prepaid/toggle-status" && typeof value?.data?.ac_toggle?.Message === "string"
+        ? value.meta?.code === 200 && value.data.ac_toggle.Message === "Execution succeeded" : null,
+      actualOn: record.method === "GET" && record.path === "/app/prepaid/ac-status" && typeof value?.data?.ac_status?.DisconnectRelay === "boolean" ? value.data.ac_status.DisconnectRelay : null } });
   }
   function parse(record, status, text) {
     if (text.length > LIMIT) return summarize(record, status, null, "too-large");

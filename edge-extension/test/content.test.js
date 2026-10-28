@@ -1130,7 +1130,7 @@ test("manual-check communication fallback caches its trigger without retrying", 
   await flush();
   const report = Object.values(h.reports)[0].report;
   assert.equal(report.error.code, "E_BACKGROUND_EMPTY_REPLY");
-  assert.equal(report.extensionVersion, "1.1.20");
+  assert.equal(report.extensionVersion, "1.1.21");
   assert.deepEqual(JSON.parse(JSON.stringify(report.manualCheck)), { trigger: "click", observedOn: true });
   assert.deepEqual(calls, ["aircon:initialize", "aircon:manualCheck"]);
 });

@@ -11,7 +11,7 @@ const run = phase => ({ id: `preview-${++runNumber}`, phase, expectedOn: phase =
   startedAt: Date.now() - 420000, phaseStartedAt: Date.now() - 420000, timingRevision: 0, nextAt: Date.now() + 180000 });
 window.chrome = {
   runtime: {
-    getManifest: () => ({ version: "1.1.20" }),
+    getManifest: () => ({ version: "1.1.21" }),
     onMessage: { addListener: listener => listeners.push(listener) },
     async sendMessage(message) {
       calls.push(message.type);
@@ -72,7 +72,7 @@ document.getElementById("scenario").addEventListener("change", async event => {
   } : null;
   if (scenario === "recovering") view.run.recovery = { deadline: Date.now() + 60000 };
   if (["query-recovering", "http-recovering"].includes(scenario)) {
-    view.run.queryRecovery = { id: "preview-incident", deadline: Date.now() + 44000,
+    view.run.queryRecovery = { id: "preview-incident", policyVersion: 2, nextAttemptAt: Date.now() + 30000, deadline: Date.now() + 240000,
       initialFailure: scenario === "http-recovering" ? { errorCode: "E_HTTP", httpStatus: 502 } : { errorCode: "E_API_TIMEOUT" } };
     view.run.recovery = { kind: "query", deadline: view.run.queryRecovery.deadline, nextAttemptAt: Date.now() + 30000 };
   }

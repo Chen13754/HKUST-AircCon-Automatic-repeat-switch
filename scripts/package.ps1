@@ -12,7 +12,7 @@ if ($version -notmatch '^\d+(\.\d+){1,3}$') { throw 'Invalid manifest version.' 
 $runtimeFiles = @(
     'manifest.json', 'api-client.js', 'api-config.js', 'background.js',
     'content.css', 'content.js', 'cycle.js', 'command-verification.js', 'diagnostics.js', 'errors.js',
-    'history.js', 'page-bridge.js', 'page-observer.js', 'report-directory.js',
+    'history.js', 'incident-followup.js', 'page-bridge.js', 'page-observer.js', 'report-directory.js',
     'report-format.js', 'report-settings.css', 'report-settings.html',
     'report-settings.js', 'reports.js'
 )

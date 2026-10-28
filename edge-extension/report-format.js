@@ -25,7 +25,7 @@
     E_DURATION: "循环分钟数无效。", E_ALREADY_RUNNING: "已有循环运行。",
     E_TIMING_STALE: "循环或阶段已变化，本次修改未执行；请核对后再次应用。",
     E_TIMING_UNAVAILABLE: "页面正在恢复，暂不能修改时间。",
-    E_OTHER_TAB: "循环在另一标签页运行。", E_NATIVE_TIMER: "学校原有定时器仍生效。",
+    E_OTHER_TAB: "循环在另一标签页运行。", E_NATIVE_TIMER: "学校原有定时器仍生效。", E_PAGE_CONTROL: "网页原生操作已取消自动恢复。",
     E_CANCELLED: "操作已取消。", E_TIMEOUT: "内部等待超时。", E_INTERNAL: "扩展内部异常。"
   };
   const sources = new Set(["start", "updateDurations", "tick", "manualCheck", "keepAlive", "keepAliveSchedule", "initialize", "reconcile", "getState", "stop", "cleanup", "pageCommunication", "openReportSettings", "lifecycle", "recovery", "background", "readRecovery", "authRecovery", "queryRecovery"]);
@@ -138,6 +138,7 @@
       startedAt: positive(value.startedAt), endedAt: positive(value.endedAt),
       httpStatus: Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
       schoolCode: Number.isSafeInteger(value.schoolCode) ? value.schoolCode : null,
+      switchAccepted: bool(value.switchAccepted), actualOn: bool(value.actualOn),
       result: pick(value.result, ["json", "invalid-json", "too-large", "unavailable", "network-error"]),
       // Page-world observations are evidence only, never authority for control.
       evidenceSource: "page-observer", browserRequestId: identifier(value.browserRequestId),
@@ -288,9 +289,15 @@
         sequence: positive(value.initialFailure.sequence)
       } : null,
       startedAt: time(value.startedAt), originalNextAt: time(value.originalNextAt), deadline: time(value.deadline),
+      policyVersion: value.policyVersion === 2 ? 2 : null,
+      attemptTimes: (Array.isArray(value.attemptTimes) ? value.attemptTimes : []).slice(0, 5).map(time),
+      nextSlot: Number.isInteger(value.nextSlot) && value.nextSlot >= 0 && value.nextSlot <= 5 ? value.nextSlot : null,
+      skippedAttempts: (Array.isArray(value.skippedAttempts) ? [...new Set(value.skippedAttempts)] : []).filter(i => Number.isInteger(i) && i >= 0 && i < 5).slice(0, 5),
+      stopReason: pick(value.stopReason, ["page-control"]),
       nextAttemptAt: time(value.nextAttemptAt), endedAt: time(value.endedAt), outcome: pick(value.outcome, ["waiting", "recovered", "cancelled", "stopped"]),
-      rounds: (Array.isArray(value.rounds) ? value.rounds : []).slice(-4).map(item => ({
+      rounds: (Array.isArray(value.rounds) ? value.rounds : []).slice(-6).map(item => ({
         operationId: identifier(item.operationId), scheduledAt: time(item.scheduledAt), startedAt: time(item.startedAt), endedAt: time(item.endedAt),
+        outcome: pick(item.outcome, ["completed", "interrupted"]),
         waitMs: positive(item.waitMs), errorCode: cleanCode(item.errorCode), actualOn: bool(item.actualOn), timerPresent: bool(item.timerPresent),
         sent: bool(item.sent), confirmed: bool(item.confirmed), requests: (Array.isArray(item.requests) ? item.requests : []).slice(-10).map(requestTrace)
       })) };
@@ -320,6 +327,23 @@
         requests: (Array.isArray(r.requests) ? r.requests : []).slice(0, 2).map(requestTrace)
       }))
     };
+  }
+  function incidentFollowup(value) {
+    if (!value || typeof value !== "object") return null;
+    const observation = item => item ? { ...pageResponse(item), id: identifier(item.id), error: networkRecord(item).error, pageEndedAt: time(item.pageEndedAt),
+      evidenceSource: pick(item.evidenceSource, ["browser", "page-observer"]),
+      sinceFailureMs: number(item.startedAt) !== null && number(value.failureStartedAt) !== null ? item.startedAt - value.failureStartedAt : null,
+      sameDocument: item.documentId && value.documentId ? item.documentId === value.documentId : null } : null;
+    return { reportId: identifier(value.reportId), runId: identifier(value.runId), tabId: tabId(value.tabId), documentId: identifier(value.documentId),
+      revision: positive(value.revision), startedAt: time(value.startedAt), deadlineAt: time(value.deadlineAt), endedAt: time(value.endedAt),
+      failurePath: paths.has(value.failurePath) ? value.failurePath : null, failureStartedAt: time(value.failureStartedAt),
+      state: pick(value.state, ["observing", "ended"]), reason: pick(value.reason, ["expired", "new-cycle", "closed", "session-ended", "superseded", "storage-failure"]),
+      conclusion: pick(value.conclusion, ["same-endpoint-discrepancy", "endpoint-later-recovered", "switch-only-success", "unknown"]), serverInternalCause: "unknown",
+      coverage: { observerReady: bool(value.coverage?.observerReady), receivedCount: positive(value.coverage?.receivedCount),
+        lastResponseAt: time(value.coverage?.lastResponseAt), browserCompletions: positive(value.coverage?.browserCompletions),
+        businessEvidenceMissing: bool(value.coverage?.businessEvidenceMissing) },
+      switches: (Array.isArray(value.switches) ? value.switches : []).slice(-4).map(s => ({ ...observation(s), statusAfter: observation(s.statusAfter) })),
+      queries: (Array.isArray(value.queries) ? value.queries : []).slice(-4).map(q => ({ ...observation(q), role: pick(q.role, ["first-success", "latest"]) })) };
   }
   function makeReport(draft = {}, environment = {}) {
     const code = Object.hasOwn(messages, draft.error?.code) ? draft.error.code : "E_INTERNAL";
@@ -355,6 +379,7 @@
       faultBoundary: faultBoundary(draft, code),
       queryRecovery: queryRecovery(draft.queryRecovery ?? draft.run?.queryRecovery),
       postCommandVerification: postCommandVerification(draft.postCommandVerification),
+      incidentFollowup: incidentFollowup(draft.incidentFollowup),
       cycle: cycle(draft.run),
       requestedDurations: draft.durations ? { onMinutes: number(draft.durations.onMinutes), offMinutes: number(draft.durations.offMinutes) } : null,
       timingChange: timingChange(draft.timingChange ?? draft.run?.lastTimingChange),
@@ -372,5 +397,5 @@
     const stamp = new Date(report.operation.startedAt).toISOString().replace(/[:.]/g, "-");
     return `aircon-error-${stamp}-${report.reportId}.json`;
   }
-  globalThis.AirconReportFormat = Object.freeze({ makeReport, postCommandVerification, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
+  globalThis.AirconReportFormat = Object.freeze({ makeReport, incidentFollowup, postCommandVerification, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
 })();

@@ -7,6 +7,7 @@ export const OPERATION_TIMEOUT_MS = 30_000;
 export const KEEP_ALIVE_MINUTES = 120;
 export const RECOVERY_LIMIT_MS = 60_000;
 export const QUERY_RETRY_DELAY_MS = 30_000;
+export const QUERY_RETRY_OFFSETS = [30_000, 60_000, 120_000, 180_000, 240_000];
 
 // A cancellation or reload is not a fault by itself. Keep a report only when a
 // switch may have been dispatched and left unconfirmed.
@@ -47,6 +48,7 @@ export class CycleController {
     this.report = report;
     this.onStopped = () => {};
     this.verificationGeneration = () => 0;
+    this.queryRecoveryPolicyVersion = 2;
     this.diagnostics = diagnostics;
     // Bound each local API separately. Do not race the entire control task:
     // its cleanup must finish before the next queued operation can run.
@@ -84,6 +86,7 @@ export class CycleController {
     this.active = null;
     this.revisions = new Map();
     this.loadingTabs = new Set();
+    this.queryRecoveryDocuments = new Map();
   }
 
   diagnostic(source, options = {}) {
@@ -159,6 +162,7 @@ export class CycleController {
     }
     const round = { ...(index >= 0 ? rounds[index] : {}), operationId: context.reportId,
       scheduledAt: recovery.nextAttemptAt ?? recovery.originalNextAt,
+      outcome: "completed",
       startedAt: context.executionStartedAt ?? context.startedAt, endedAt: this.clock(),
       waitMs: index >= 0 ? rounds[index].waitMs : Math.max(0, (context.executionStartedAt ?? context.startedAt) - (rounds.at(-1)?.endedAt ?? recovery.startedAt)),
       errorCode: context.error?.code, requests: context.requests,
@@ -173,17 +177,26 @@ export class CycleController {
     return new CycleError(recovery?.initialFailure?.errorCode ?? recovery?.rounds?.[0]?.errorCode ?? "E_INTERNAL", message);
   }
 
-  async beginQueryRecovery(run, error, signal, context) {
+  transientQueryFailure(error, context) {
     const request = context.requests.find(item => item.sequence === error.requestSequence && item.errorCode === error.code);
-    const transientHttp = error.code === "E_HTTP" && request?.method === "GET"
+    const eligibleRead = request?.method === "GET"
       && ["/app/prepaid/ac-timer", "/app/prepaid/ac-status"].includes(request.path)
-      && [502, 503, 504].includes(request.httpStatus);
-    if ((error.code !== "E_API_TIMEOUT" && !transientHttp) || context.command?.sent || signal.aborted) return false;
-    const nextAttemptAt = this.clock() + QUERY_RETRY_DELAY_MS, deadline = run.nextAt + LATE_LIMIT_MS;
+      && (error.code === "E_API_TIMEOUT" || error.code === "E_HTTP" && [502, 503, 504].includes(request.httpStatus));
+    // Mock adapters and pre-structured legacy timeout errors remain supported.
+    return !context.command?.sent && (eligibleRead || error.code === "E_API_TIMEOUT" && error.requestSequence === undefined);
+  }
+
+  async beginQueryRecovery(run, error, signal, context) {
+    if (!this.transientQueryFailure(error, context) || signal.aborted || this.clock() - run.nextAt > LATE_LIMIT_MS) return false;
+    const request = context.requests.find(item => item.sequence === error.requestSequence && item.errorCode === error.code);
+    const modern = this.queryRecoveryPolicyVersion === 2;
+    const failedAt = this.clock();
+    const nextAttemptAt = failedAt + QUERY_RETRY_DELAY_MS, deadline = run.nextAt + (modern ? 300_000 : LATE_LIMIT_MS);
     if (nextAttemptAt >= deadline) return false;
     context.error = error;
     const recovery = this.querySnapshot({ id: globalThis.AirconReportFormat.newId(), initialOperationId: context.reportId,
-      startedAt: this.clock(), originalNextAt: run.nextAt, deadline,
+      startedAt: failedAt, originalNextAt: run.nextAt, deadline,
+      ...(modern ? { policyVersion: 2, attemptTimes: QUERY_RETRY_OFFSETS.map(offset => failedAt + offset), nextSlot: 0, skippedAttempts: [] } : {}),
       initialFailure: { errorCode: error.code, httpStatus: request?.httpStatus, path: request?.path, sequence: request?.sequence },
       rounds: [] }, context);
     recovery.nextAttemptAt = nextAttemptAt;
@@ -206,10 +219,21 @@ export class CycleController {
     context.dispatchDeadlineAt = run.queryRecovery.deadline;
     try {
       this.checkDeadline(signal);
+      if (run.queryRecovery.policyVersion === 2) {
+        const recovery = structuredClone(run.queryRecovery);
+        let slot = recovery.nextSlot;
+        while (slot + 1 < recovery.attemptTimes.length && recovery.attemptTimes[slot + 1] <= this.clock()) {
+          recovery.skippedAttempts.push(slot++);
+        }
+        if (slot >= recovery.attemptTimes.length) throw new CycleError("E_QUERY_RECOVERY_TIMEOUT", "恢复轮次已用完。");
+        recovery.nextSlot = slot + 1;
+        recovery.nextAttemptAt = recovery.attemptTimes[slot];
+        run = { ...run, queryRecovery: recovery };
+      }
       // A cold worker must see an in-progress read even if its alarm was consumed.
       const round = { operationId: context.reportId, scheduledAt: run.queryRecovery.nextAttemptAt,
         startedAt: this.clock(), waitMs: Math.max(0, this.clock() - (run.queryRecovery.rounds.at(-1)?.endedAt ?? this.clock())) };
-      run = { ...run, queryRecovery: { ...run.queryRecovery, rounds: [...run.queryRecovery.rounds, round].slice(-4) } };
+      run = { ...run, queryRecovery: { ...run.queryRecovery, rounds: [...run.queryRecovery.rounds, round].slice(-6) } };
       context.run = run;
       await this.saveRun(run);
       this.checkDeadline(signal);
@@ -221,9 +245,50 @@ export class CycleController {
         queryRecovery: result, error: this.queryRecoveryError(run, "查询异常后已恢复。") }); } catch { /* Diagnostic only. */ }
     } catch (error) {
       context.error = error;
-      // This window admits at most one delayed round; it is never extended.
+      if (run.queryRecovery.policyVersion === 2 && !signal.aborted && this.transientQueryFailure(error, context)) {
+        const recovery = this.querySnapshot(run.queryRecovery, context);
+        const nextAt = recovery.attemptTimes[recovery.nextSlot];
+        if (Number.isFinite(nextAt) && nextAt < recovery.deadline && this.clock() < recovery.deadline) {
+          run = { ...run, queryRecovery: { ...recovery, nextAttemptAt: nextAt },
+            recovery: { ...run.recovery, kind: "query", nextAttemptAt: nextAt } };
+          context.run = run;
+          try { await this.saveRun(run); await this.recoveryAlarm.create(run.id, nextAt); await this.notify(run.tabId); return; }
+          catch (failure) { error = failure; context.error = failure; }
+        }
+      }
       await this.handleTransitionError(run, error, context);
     }
+  }
+
+  async restoreQueryRound(run) {
+    const recovery = run.queryRecovery;
+    if (recovery?.policyVersion !== 2 || !recovery.rounds.at(-1)?.startedAt || recovery.rounds.at(-1).endedAt != null) return run;
+    const restored = structuredClone(recovery);
+    Object.assign(restored.rounds.at(-1), { endedAt: this.clock(), outcome: "interrupted" });
+    while (restored.nextSlot < restored.attemptTimes.length && restored.attemptTimes[restored.nextSlot] <= this.clock()) restored.skippedAttempts.push(restored.nextSlot++);
+    const nextAt = restored.attemptTimes[restored.nextSlot];
+    if (!Number.isFinite(nextAt) || nextAt >= restored.deadline) throw new CycleError("E_QUERY_RECOVERY_TIMEOUT", "恢复轮次已用完。");
+    restored.nextAttemptAt = nextAt;
+    const next = { ...run, queryRecovery: restored, recovery: { ...run.recovery, nextAttemptAt: nextAt } };
+    await this.saveRun(next);
+    return next;
+  }
+
+  externalControl(tabId, documentId) {
+    const active = this.active?.diagnostic?.run;
+    const known = this.queryRecoveryDocuments.get(tabId);
+    if ((active?.tabId === tabId && active.queryRecovery || this.queryRecoveryDocuments.has(tabId)) && (!documentId || !known || documentId === known)) {
+      if (this.active?.tabId === tabId) this.active.diagnostic.externalControl = true;
+      this.cancel(tabId);
+    }
+    return this.enqueue(async () => {
+      const run = await this.store.getRun();
+      if (!run?.queryRecovery || run.tabId !== tabId || documentId && run.documentId && run.documentId !== documentId) return;
+      const context = this.diagnostic("queryRecovery", { run });
+      context.queryRecovery = { ...run.queryRecovery, outcome: "cancelled", endedAt: this.clock(), stopReason: "page-control" };
+      this.recordError(this.queryRecoveryError(run, "网页原生操作已取消自动恢复。"), context, run);
+      await this.clearRun(run, "检测到网页原生开关或定时器操作，自动恢复已取消；请自行确认空调状态。", "info", context);
+    });
   }
 
   operation(tabId, work, context = this.diagnostic("getState")) {
@@ -289,6 +354,8 @@ export class CycleController {
   async saveRun(run) {
     await this.history.save(run);
     await this.store.setRun(run);
+    if (run.queryRecovery) this.queryRecoveryDocuments.set(run.tabId, run.documentId);
+    else this.queryRecoveryDocuments.delete(run.tabId);
   }
 
   async restoreProtection(run) {
@@ -308,7 +375,7 @@ export class CycleController {
   initialize(tabId, options = {}) {
     const context = this.diagnostic("initialize", options);
     return this.operation(tabId, async signal => {
-      const run = await this.store.getRun(signal);
+      let run = await this.store.getRun(signal);
       if (!run || run.tabId !== tabId) {
         this.loadingTabs.delete(tabId);
         if (!run) {
@@ -324,6 +391,8 @@ export class CycleController {
       if (run.queryRecovery) {
         try {
           if ((await this.checkHistory(run, context)).stopped) return;
+          if (this.clock() >= run.recovery.deadline) throw new CycleError("E_RECOVERY_TIMEOUT", "页面恢复期限已到。");
+          run = await this.restoreQueryRound(run);
           context.dispatchDeadlineAt = run.queryRecovery.deadline;
           this.checkDeadline(signal);
           const resumed = { ...run, documentId: options.documentId ?? run.documentId, lifecycle: context.lifecycle,
@@ -394,6 +463,7 @@ export class CycleController {
         const authentication = lifecycle.event === "authentication" || run.recovery?.kind === "authentication";
         const recovery = { ...(run.recovery ?? { at: this.clock(), deadline: Math.min(this.clock() + RECOVERY_LIMIT_MS, run.nextAt + LATE_LIMIT_MS) }),
           kind: authentication ? "authentication" : "reload" };
+        if (run.queryRecovery?.policyVersion === 2) recovery.deadline = Math.min(recovery.deadline, this.clock() + RECOVERY_LIMIT_MS);
         const reason = authentication ? { ...lifecycle, event: "authentication", tabId } : lifecycle;
         const suspended = { ...run, recovery, lifecycle: reason };
         context.run = suspended; context.lifecycle = reason;
@@ -411,11 +481,17 @@ export class CycleController {
   recoveryExpired(runId, scheduledAt) {
     const context = this.diagnostic("queryRecovery");
     return this.store.getRun().then(initial => this.operation(initial?.tabId, async signal => {
-      const run = await this.store.getRun(signal);
+      let run = await this.store.getRun(signal);
       if (!run || run.id !== runId || !run.recovery) return;
       context.run = run; context.lifecycle = run.lifecycle;
       try {
         if ((await this.checkHistory(run, context)).stopped) return;
+        this.queryRecoveryDocuments.set(run.tabId, run.documentId);
+        if (run.queryRecovery?.policyVersion === 2 && run.queryRecovery.rounds.at(-1)?.endedAt == null) {
+          run = await this.restoreQueryRound(run);
+          await this.recoveryAlarm.create(run.id, run.recovery.kind === "query" ? run.recovery.nextAttemptAt : run.recovery.deadline);
+          return;
+        }
         const nextAt = run.recovery.kind === "query" ? run.recovery.nextAttemptAt : run.recovery.deadline;
         if (this.clock() >= run.recovery.deadline) throw new CycleError(run.queryRecovery ? "E_QUERY_RECOVERY_TIMEOUT" : "E_RECOVERY_TIMEOUT", "恢复已到期限，循环已停止。");
         if (Number.isFinite(scheduledAt) && Math.abs(scheduledAt - nextAt) > 1000) return;
@@ -428,11 +504,13 @@ export class CycleController {
   reconcile(deliveredCycles = new Map()) {
     const context = this.diagnostic("reconcile");
     return this.enqueue(async () => {
-      const run = await this.store.getRun();
+      let run = await this.store.getRun();
       context.run = run;
       const { checkpoint, stopped } = await this.checkHistory(run, context);
       if (stopped || !run) return;
       if (run.recovery) {
+        try { run = await this.restoreQueryRound(run); }
+        catch (error) { await this.handleTransitionError(run, error, context); return; }
         if (this.clock() >= run.recovery.deadline) {
           const error = new CycleError(run.queryRecovery ? "E_QUERY_RECOVERY_TIMEOUT" : "E_RECOVERY_TIMEOUT", "恢复已到期限，循环已停止。");
           this.recordError(error, context, run);
@@ -461,7 +539,8 @@ export class CycleController {
   async checkHistory(run, context) {
     const checkpoint = await this.history.get();
     const recoveryState = value => JSON.stringify([value?.recovery?.kind, value?.recovery?.deadline, value?.recovery?.nextAttemptAt,
-      value?.queryRecovery?.id, value?.queryRecovery?.deadline, value?.queryRecovery?.nextAttemptAt, value?.queryRecovery?.rounds?.at(-1)?.operationId]);
+      value?.queryRecovery?.id, value?.queryRecovery?.deadline, value?.queryRecovery?.nextAttemptAt, value?.queryRecovery?.rounds?.at(-1)?.operationId,
+      value?.queryRecovery?.policyVersion, value?.queryRecovery?.attemptTimes, value?.queryRecovery?.nextSlot, value?.queryRecovery?.skippedAttempts]);
     if (run && checkpoint?.active === false && checkpoint.run?.id === run.id) {
       await this.clearRun(run, checkpoint.notice.text, checkpoint.notice.kind, { command: checkpoint.command });
       return { checkpoint, stopped: true };
@@ -638,10 +717,10 @@ export class CycleController {
   async advancePhase(run, signal, context) {
     if (!await this.page.isOpen(run.tabId, signal)) throw new CycleError("E_PAGE_CLOSED", "学校主页已关闭或离开。");
     this.checkDeadline(signal);
-    if (this.clock() - run.nextAt > LATE_LIMIT_MS) throw new CycleError("E_ALARM_LATE", "定时切换延误超过 1 分钟，不再发送开关指令。");
+    if (!run.queryRecovery && this.clock() - run.nextAt > LATE_LIMIT_MS) throw new CycleError("E_ALARM_LATE", "定时切换延误超过 1 分钟，不再发送开关指令。");
     const [timer, actual] = await this.readPreflight(run.tabId, signal, context.dispatchDeadlineAt);
     this.checkDeadline(signal);
-    if (this.clock() - run.nextAt > LATE_LIMIT_MS) throw new CycleError("E_ALARM_LATE", "查询期间已超过切换时间 1 分钟，取消本次切换。");
+    if (!run.queryRecovery && this.clock() - run.nextAt > LATE_LIMIT_MS) throw new CycleError("E_ALARM_LATE", "查询期间已超过切换时间 1 分钟，取消本次切换。");
     context.preflight = { actual, timerPresent: hasNativeTimer(timer) };
     if (context.preflight.timerPresent) throw new CycleError("E_NATIVE_TIMER", "学校原有定时器仍生效。");
     if (actual !== run.expectedOn) throw new CycleError("E_STATUS_CHANGED", "空调状态与循环预期不符。");
@@ -666,6 +745,10 @@ export class CycleController {
   }
 
   async handleTransitionError(run, error, context) {
+    if (context.externalControl) {
+      error = new CycleError("E_PAGE_CONTROL", "网页原生操作已取消自动恢复，请自行确认空调状态。");
+      context.queryRecovery = { ...this.querySnapshot(run.queryRecovery, context, "cancelled"), stopReason: "page-control" };
+    }
     context.error = error;
     if (run.queryRecovery) context.recoveryReported = true;
     if (error.code === "E_PAGE_RELOADING" && !context.command?.sent) {
@@ -807,6 +890,7 @@ export class CycleController {
   }
 
   async clearRun(run, text, kind, context = this.active?.diagnostic) {
+    this.queryRecoveryDocuments.delete(run.tabId);
     if (run.queryRecovery && !context?.queryRecovery?.endedAt) {
       const prior = context;
       context = this.diagnostic("queryRecovery", { run, command: prior?.command, lastConfirmedStatus: prior?.lastConfirmedStatus,

@@ -10,7 +10,7 @@ import { CommandVerification } from "./command-verification.js";
 const HOME_PATH = "/njggt/app/home";
 const pageMessageTypes = new Set(["aircon:initialize", "aircon:getState", "aircon:start", "aircon:updateDurations", "aircon:stop", "aircon:manualCheck", "aircon:openReportSettings"]);
 const reportTabs = new Set();
-const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.20", userAgent: globalThis.navigator?.userAgent };
+const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.21", userAgent: globalThis.navigator?.userAgent };
 const reporter = new ErrorReporter({
   storage: chrome.storage.local,
   environment,
@@ -19,7 +19,13 @@ const reporter = new ErrorReporter({
     chrome.runtime.sendMessage?.({ type: "aircon:reportStatusChanged", status })?.catch(() => {});
   }
 });
-const diagnostics = new Diagnostics({ storage: chrome.storage.local, runtimeId: chrome.runtime.id,
+const diagnostics = new Diagnostics({ storage: chrome.storage.local, sessionStorage: chrome.storage.session, runtimeId: chrome.runtime.id,
+  followupAlarm: { create: (id, when) => chrome.alarms.create(`followup:${id}`, { when }), clear: id => chrome.alarms.clear(`followup:${id}`) },
+  onFollowup: (id, value) => reporter.updateFollowup(id, value), onOrphanFollowups: ids => reporter.interruptFollowups(ids),
+  followupCanStart: async state => {
+    const checkpoint = (await chrome.storage.local.get("cycleCheckpoint")).cycleCheckpoint;
+    return checkpoint?.active === false && checkpoint.run?.id === state.runId;
+  },
   onUpdate: (id, snapshot) => reporter.enrich(id, snapshot), onIncident: draft => capture(draft) });
 diagnostics.attach(chrome);
 const capture = draft => {
@@ -173,6 +179,7 @@ const verification = new CommandVerification({
 controller.verificationGeneration = tabId => verification.generationFor(tabId);
 controller.onStopped = (draft, failure) => {
   if (!draft) return;
+  if (!failure) void diagnostics.startFollowup(draft).catch(() => {});
   void verification.start({ ...draft, error: { code: draft.error.code, requestSequence: draft.error.requestSequence },
     run: { ...draft.run }, command: { ...draft.command }, requests: structuredClone(draft.requests) }, failure);
 };
@@ -276,6 +283,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "aircon:getState":
         break;
       case "aircon:start": {
+        await diagnostics.endFollowup(tabId, "new-cycle");
         const onMinutes = message.onMinutes;
         const offMinutes = message.offMinutes;
         await controller.start(tabId, onMinutes, offMinutes, options);
@@ -297,7 +305,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       default:
         throw new Error("未知扩展操作。");
     }
-    return { ...await controller.getView(tabId), postCommandVerification: verification.view(tabId), reports: { ...reporter.state } };
+    return { ...await controller.getView(tabId), postCommandVerification: verification.view(tabId), incidentFollowup: globalThis.AirconReportFormat.incidentFollowup(diagnostics.followups.get(tabId)), reports: { ...reporter.state } };
   })().then(view => sendResponse({ ok: true, view }))
     .catch(async error => {
       if (!error?.reportId) capture({ ...options, source: message?.type?.replace("aircon:", ""), error });
@@ -308,6 +316,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener(item => {
+  if (item.name.startsWith("followup:")) {
+    void diagnostics.ready.then(() => {
+      const state = [...diagnostics.followups.values()].find(s => s.reportId === item.name.slice(9) && s.deadlineAt === item.scheduledTime);
+      if (state && Date.now() >= state.deadlineAt) diagnostics.closeFollowup(state.tabId, "expired");
+    });
+    return;
+  }
   if (item.name.startsWith("verification:")) { void verification.onAlarm(item.name.slice("verification:".length), item.scheduledTime); return; }
   if (/^(cycle|keepalive|recovery):/.test(item.name)) diagnostics.event(null, { component: "alarm", step: "alarmDelivered", scheduledAt: item.scheduledTime, latenessMs: Date.now() - item.scheduledTime, outcome: "ok" });
   if (item.name.startsWith("recovery:")) {
@@ -324,6 +339,7 @@ chrome.alarms.onAlarm.addListener(item => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+  void diagnostics.endFollowup(tabId, "closed");
   void verification.cancel(tabId, "page_closed");
   if (reportTabs.has(tabId)) { diagnostics.event(null, { tabId, component: "page", step: "closed", outcome: "ok" }); diagnostics.flush(); }
   reportTabs.delete(tabId);
@@ -370,10 +386,21 @@ try {
 } catch { diagnostics.coverage.webNavigation = false; }
 
 chrome.runtime.onStartup?.addListener(() => {
+  void diagnostics.endFollowup(null, "session-ended");
   void verification.cancel(null, "session_ended");
   ensureReady().catch(error => { capture({ source: "reconcile", error }); console.error("AC startup reconciliation failed", error); });
 });
-chrome.runtime.onInstalled?.addListener(() => { void verification.cancel(null, "session_ended"); });
+chrome.runtime.onInstalled?.addListener(() => { void verification.cancel(null, "session_ended"); void diagnostics.endFollowup(null, "session-ended"); });
+
+// Only browser-provided request identity can cancel recovery. Page diagnostics
+// may enrich reports, but cannot authorize or cancel a control operation.
+try {
+  chrome.webRequest.onBeforeRequest.addListener(details => {
+    if (details.method !== "POST" || details.frameId !== 0 || details.initiator !== SITE_ORIGIN || !Number.isInteger(details.tabId) || details.tabId < 0) return;
+    const path = globalThis.AirconReportFormat.observedPath(details.url);
+    if (["/app/prepaid/toggle-status", "/app/prepaid/ac-timer"].includes(path)) void controller.externalControl(details.tabId, details.documentId).catch(error => capture({ source: "queryRecovery", error }));
+  }, { urls: ["https://w5.ab.ust.hk/njggt/api/app/prepaid/*"] });
+} catch { /* The existing webRequest coverage flag reports availability. */ }
 
 for (const type of ["error", "unhandledrejection"]) globalThis.addEventListener?.(type, event => {
   const error = event.error ?? event.reason;

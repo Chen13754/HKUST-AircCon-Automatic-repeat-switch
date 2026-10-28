@@ -12,7 +12,7 @@ export async function verifyObserverBrowser(page) {
   const local = {}, session = {}, alarms = new Map(), listeners = new Map(), messages = [], exports = [];
   const add = name => ({ addListener(fn) { const set = listeners.get(name) ?? []; set.push(fn); listeners.set(name, set); } });
   const emit = (name, details) => { for (const fn of listeners.get(name) ?? []) fn(details); };
-  let messageListener, alarmListener, browserPosts = 0, extensionPosts = 0, cdp;
+  let messageListener, alarmListener, browserPosts = 0, extensionPosts = 0, cdp, pageRejection = null;
   const now = Date.now(), run = { id: "browser-run", tabId: 8, documentId: "browser-doc", phase: "on", expectedOn: true,
     onMinutes: 2, offMinutes: 4, nextAt: now - 46000, phaseStartedAt: now-166000, startedAt: now-600000,
     queryRecovery: { id: "first-incident", initialOperationId: "first-operation", startedAt: now-30000, originalNextAt: now-46000,
@@ -20,7 +20,7 @@ export async function verifyObserverBrowser(page) {
     recovery: { kind: "query", deadline: now+14000, nextAttemptAt: now-1 } };
   session.cycleRun = structuredClone(run); local.cycleCheckpoint = { active: true, run: structuredClone(run), command: null };
   globalThis.chrome = { storage: { local: memoryStorage(local), session: memoryStorage(session) },
-    runtime: { id: "browser-verification", getManifest: () => ({ version: "1.1.21" }), onMessage: { addListener(fn) { messageListener = fn; } } },
+    runtime: { id: "browser-verification", getManifest: () => ({ version: "1.1.22" }), onMessage: { addListener(fn) { messageListener = fn; } } },
     tabs: { get: async () => ({ url }), sendMessage: async (_tab, msg) => msg.type === "aircon:getToken" ? { token: "FAKE-TEST-TOKEN" } : undefined,
       onRemoved: add("removed"), onUpdated: add("updated") },
     alarms: { get: async id => alarms.get(id), create: async (id, value) => alarms.set(id, { scheduledTime: value.when }), clear: async id => alarms.delete(id),
@@ -36,6 +36,7 @@ export async function verifyObserverBrowser(page) {
       if (request.url() === url) return route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Isolated school mock</title><div>Mock only</div>" });
       if (!request.url().startsWith(api + "/app/prepaid/")) return route.abort();
       if (request.method() === "POST") browserPosts++;
+      if (request.method() === "POST" && pageRejection) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ meta: { code: 403, message: pageRejection } }) });
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ meta: { code: 200 }, data: {
         ac_toggle: { Message: "Execution succeeded" }, ac_status: { DisconnectRelay: false }, ac_timer: null, token: "SECRET-NOT-EXPORTED" } }) });
     });
@@ -70,6 +71,7 @@ export async function verifyObserverBrowser(page) {
     const read = name => readFile(new URL(`../edge-extension/${name}.js`, import.meta.url), "utf8");
     await cdp.send("Runtime.evaluate", { contextId: executionContextId, expression:
       `globalThis.chrome={runtime:{sendMessage:message=>{sendToMockBackground(JSON.stringify(message));return Promise.resolve({ok:true});}}};\n${await read("report-format")}\n${await read("page-bridge")}` });
+    await page.addScriptTag({ content: await read("report-format") });
     await page.addScriptTag({ content: await read("page-observer") });
     const result = await page.evaluate(async base => {
       const toggle = await new Promise((resolve, reject) => { const xhr = new XMLHttpRequest(); xhr.open("POST", base+"/app/prepaid/toggle-status");
@@ -90,6 +92,21 @@ export async function verifyObserverBrowser(page) {
     assert.ok(report.incidentFollowup.queries.some(q => q.path === "/app/prepaid/ac-timer" && q.schoolCode === 200));
     assert.equal(JSON.stringify(report).includes("SECRET-NOT-EXPORTED"), false);
     assert.equal(extensionPosts, 0); assert.equal(browserPosts, 1);
+    for (const reason of ["Device request timed out", "Bearer SECRET-NOT-EXPORTED"]) {
+      // Separate simulated clicks beyond the observer's correlation window;
+      // rapid overlapping requests correctly remain ambiguous instead.
+      await new Promise(resolve => setTimeout(resolve, 300));
+      pageRejection = reason;
+      await page.evaluate(async base => { await (await fetch(base+"/app/prepaid/toggle-status", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ toggle: { status: 1 } }) })).json(); }, api);
+      await new Promise(resolve => setTimeout(resolve, 60)); await settle();
+    }
+    await reporter.flush();
+    const supplemented = exports.at(-1);
+    const explanations = supplemented.incidentFollowup.switches.map(s => s.businessError).filter(Boolean);
+    assert.ok(explanations.some(b => b.text === "Device request timed out" && b.category === "reported-timeout"), JSON.stringify(explanations));
+    assert.ok(explanations.some(b => b.text === null && b.omissionReason === "sensitive"));
+    assert.equal(JSON.stringify(messages).includes("SECRET-NOT-EXPORTED"), false);
+    assert.equal(supplemented.error.code, "E_HTTP"); assert.equal(supplemented.diagnosis.serverInternalCause, "unknown");
     // Browser identity, not a page diagnostic payload, owns manual cancellation.
     const pending = structuredClone(run); pending.recovery.nextAttemptAt = Date.now() + 30000;
     pending.recovery.deadline = Date.now()+60000; pending.queryRecovery.nextAttemptAt = pending.recovery.nextAttemptAt;
@@ -101,7 +118,7 @@ export async function verifyObserverBrowser(page) {
     emit("onBeforeRequest", { ...native, frameId: 0, initiator: "chrome-extension://browser-verification" }); await settle(); assert.ok(session.cycleRun);
     emit("onBeforeRequest", { ...native, frameId: 0 }); await settle(); assert.equal(session.cycleRun, undefined);
     assert.equal(extensionPosts, 0);
-    return { passed: true, pageResponses: 3, exportedFollowup: report.incidentFollowup.conclusion, extensionPosts, simulatedPagePosts: browserPosts, browserIdentityCancellation: true };
+    return { passed: true, pageResponses: 5, businessReasonSanitized: true, exportedFollowup: report.incidentFollowup.conclusion, extensionPosts, simulatedPagePosts: browserPosts, browserIdentityCancellation: true };
   } finally { await cdp?.detach(); await page.unroute("**/*"); globalThis.chrome = oldChrome; globalThis.fetch = oldFetch; }
 }
 

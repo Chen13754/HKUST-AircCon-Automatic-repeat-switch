@@ -19,8 +19,8 @@ export function timingFromEntry(entry, timeOrigin) {
 }
 
 // A bounded flight recorder, separate from the control checkpoint. It observes
-// only allowlisted school endpoints. Page-world bodies are reduced to numeric
-// business codes before crossing into the extension; headers are never read.
+// only allowlisted school endpoints. Page bodies are reduced to codes, typed
+// outcomes and filtered business explanations; headers are never read.
 export class Diagnostics {
   constructor({ storage, sessionStorage, followupAlarm, followupCanStart = async () => true, onFollowup = async () => true, onOrphanFollowups = async () => {}, runtimeId, clock = () => Date.now(), onUpdate = () => {}, onIncident = () => {}, timeoutMs = 500 }) {
     Object.assign(this, { storage, runtimeId, clock, onUpdate, onIncident, timeoutMs });
@@ -169,15 +169,16 @@ export class Diagnostics {
   }
 
   async startFollowup(draft) {
-    if (!draft?.queryRecovery?.endedAt || draft.command?.sent || !["stopped", "cancelled"].includes(draft.queryRecovery.outcome)) return;
+    const terminal = new Set(["E_API_REJECTED", "E_SWITCH_REJECTED", "E_STATUS_UNCONFIRMED", "E_API_TIMEOUT", "E_OPERATION_TIMEOUT", "E_NETWORK", "E_HTTP", "E_JSON", "E_STATUS_FORMAT", "E_TIMER_FORMAT", "E_AUTH", "E_COMMAND_UNKNOWN", "E_CYCLE_INTERRUPTED", "E_START_INTERRUPTED", "E_ALARM_LATE", "E_ALARM_MISSING", "E_LOCAL_STORAGE", "E_LOCAL_TIMEOUT", "E_SCHEDULE"]);
+    if (!draft?.run || !terminal.has(draft.error?.code) && !(draft.queryRecovery?.endedAt && draft.queryRecovery.outcome === "stopped")) return;
     await this.ready;
     if (!await this.followupCanStart({ runId: draft.run.id, tabId: draft.run.tabId })) return;
     this.closeFollowup(draft.run.tabId, "superseded");
-    const initial = draft.queryRecovery.initialFailure;
+    const initial = draft.queryRecovery?.initialFailure;
     const failed = draft.requests?.find(r => Number.isSafeInteger(draft.error?.requestSequence) && r.sequence === draft.error.requestSequence && r.errorCode === draft.error.code)
-      ?? draft.queryRecovery.rounds[0]?.requests.find(r => Number.isSafeInteger(initial?.sequence) && r.sequence === initial.sequence && r.errorCode === initial.errorCode);
+      ?? draft.queryRecovery?.rounds[0]?.requests.find(r => Number.isSafeInteger(initial?.sequence) && r.sequence === initial.sequence && r.errorCode === initial.errorCode);
     const state = { reportId: draft.reportId, runId: draft.run.id, tabId: draft.run.tabId, documentId: draft.run.documentId, startedAt: this.clock(), deadlineAt: this.clock() + 900000,
-      revision: 0, state: "observing", conclusion: "unknown", failurePath: failed?.path ?? draft.queryRecovery.initialFailure?.path,
+      revision: 0, state: "observing", conclusion: "unknown", failurePath: failed?.path ?? initial?.path,
       failureStartedAt: failed?.startedAt ?? null, switches: [], queries: [],
       coverage: { observerReady: this.sites.get(draft.run.tabId)?.responseObserver ?? null, receivedCount: 0, browserCompletions: 0, businessEvidenceMissing: null } };
     this.followups.set(state.tabId, state);

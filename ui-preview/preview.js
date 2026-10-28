@@ -11,7 +11,7 @@ const run = phase => ({ id: `preview-${++runNumber}`, phase, expectedOn: phase =
   startedAt: Date.now() - 420000, phaseStartedAt: Date.now() - 420000, timingRevision: 0, nextAt: Date.now() + 180000 });
 window.chrome = {
   runtime: {
-    getManifest: () => ({ version: "1.1.21" }),
+    getManifest: () => ({ version: "1.1.22" }),
     onMessage: { addListener: listener => listeners.push(listener) },
     async sendMessage(message) {
       calls.push(message.type);
@@ -66,7 +66,7 @@ document.getElementById("scenario").addEventListener("change", async event => {
   scenario = event.target.value;
   view.run = ["on", "off", "warning", "recovering", "query-recovering", "http-recovering", "blocked"].includes(scenario) ? run(scenario === "off" ? "off" : "on") : null;
   view.blocked = scenario === "blocked";
-  view.postCommandVerification = ["verifying", "verified"].includes(scenario) ? {
+  view.postCommandVerification = ["verifying", "verified", "business-rejected"].includes(scenario) ? {
     state: scenario === "verifying" ? "waiting" : "completed", deadlineAt: Date.now() + 35000,
     conclusion: scenario === "verifying" ? "original_observed" : "target_observed", rounds: [{ actualOn: scenario === "verified", timerPresent: false }]
   } : null;
@@ -86,6 +86,11 @@ document.getElementById("scenario").addEventListener("change", async event => {
       : "[E_SESSION_ENDED] 浏览器或扩展会话已结束，具体原因未知；上次循环未恢复。" };
   if (scenario === "blocked") view.notice = { kind: "error", text: "[E_LOCAL_STORAGE] 循环清理失败，已禁止后续空调指令；请重新加载扩展并确认空调状态。" };
   if (view.postCommandVerification) view.notice = { kind: "error", outcomeUnknown: true, text: "开关请求等待超时，原指令结果未知；后续查询仅提供状态观察，不自动重发或接续。（本地模拟）" };
+  if (scenario === "business-rejected") {
+    view.postCommandVerification.state = "waiting";
+    view.postCommandVerification.conclusion = "unknown"; view.postCommandVerification.rounds = [];
+    view.notice = { kind: "error", outcomeUnknown: true, text: "[E_API_REJECTED] 开机请求 HTTP 200／学校业务码 403。学校说明：Device request timed out。循环已停止，后续核验仅提供观察，不重发指令。（本地模拟）" };
+  }
   notify({ type: "aircon:stateChanged" });
   for (let i = 0; i < 12; i++) await Promise.resolve();
   if (["busy", "unknown"].includes(scenario)) document.querySelector(".ac-cycle-start").click();

@@ -108,7 +108,7 @@
       const format = globalThis.AirconReportFormat;
       const report = format.makeReport({
         reportId, startedAt, source: "pageCommunication", error,
-        run: view.run, snapshotOrigin: "page-cache", outcomeUnknown: true,
+        run: view.run, snapshotOrigin: "page-cache", outcomeUnknown: view.notice?.outcomeUnknown === true || !readOnlyMessages.has(messageType),
         postCommandVerification: view.postCommandVerification,
         incidentFollowup: view.incidentFollowup,
         cachedAt, visibility: document.visibilityState, durations, manualCheck,
@@ -117,7 +117,7 @@
           phase: view.run?.phase, phaseStartedAt: view.run?.phaseStartedAt, previousNextAt: view.run?.nextAt, outcome: "unknown" } : undefined,
         diagnostics: { coverage: { journal: "unavailable" }, site: pageEvidence(), events: pageEvents, network: pageResources },
         communication: { messageType, reason: error.communicationReason, tabIsHome: isHome() }
-      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.21", userAgent: globalThis.navigator?.userAgent });
+      }, { version: chrome.runtime.getManifest?.().version ?? "1.1.22", userAgent: globalThis.navigator?.userAgent });
       chrome.storage.local.set({ [format.fallbackKey(report.reportId)]: { report, saved: false } }).then(async () => {
         reportStatus = { phase: "cached", pending: 1 };
         render();
@@ -163,9 +163,10 @@
     return label;
   }
 
-  function communicationFailure(code, communicationReason) {
+  const readOnlyMessages = new Set(["aircon:getState", "aircon:manualCheck", "aircon:openReportSettings"]);
+  function communicationFailure(code, communicationReason, type) {
     return { ok: false, code, communicationReason,
-      error: `[${code}] ${communicationMessages[code]}结果未确认，请停止循环或刷新页面。` };
+      error: `[${code}] ${readOnlyMessages.has(type) ? "状态读取失败，请重新读取扩展状态；本次消息不会发送开关指令。" : `${communicationMessages[code]}结果未确认，请停止循环或刷新页面。`}` };
   }
 
   const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -191,14 +192,14 @@
     try {
       result = await Promise.race([
         chrome.runtime.sendMessage({ type, ...data, reportId, startedAt }),
-        new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, code: "E_BACKGROUND_TIMEOUT", communicationReason: "TIMEOUT", error: `[E_BACKGROUND_TIMEOUT] ${type} 等待后台超过 ${ms / 1000} 秒；结果未确认，请停止循环或刷新页面。` }), ms); })
+        new Promise(resolve => { timer = setTimeout(() => resolve(communicationFailure("E_BACKGROUND_TIMEOUT", "TIMEOUT", type)), ms); })
       ]);
-      if (result == null) result = communicationFailure("E_BACKGROUND_EMPTY_REPLY", result === null ? "NULL_REPLY" : "UNDEFINED_REPLY");
-      else if (!validReply(result)) result = communicationFailure("E_BACKGROUND_INVALID_REPLY", "INVALID_REPLY");
+      if (result == null) result = communicationFailure("E_BACKGROUND_EMPTY_REPLY", result === null ? "NULL_REPLY" : "UNDEFINED_REPLY", type);
+      else if (!validReply(result)) result = communicationFailure("E_BACKGROUND_INVALID_REPLY", "INVALID_REPLY", type);
     } catch (error) {
       const message = typeof error?.message === "string" ? error.message : typeof error === "string" ? error : "";
       const [code, reason] = browserFailures.get(message.replace(/\.$/, "")) ?? ["E_BACKGROUND_UNAVAILABLE", "UNKNOWN"];
-      result = communicationFailure(code, reason);
+      result = communicationFailure(code, reason, type);
     }
     finally { clearTimeout(timer); }
     if (currentAction === actionId && communicationCodes.has(result.code) && !globalThis.AirconReportFormat.identifier(result.reportId)) {
@@ -443,7 +444,7 @@
     const help = element("div", "ac-cycle-help");
     help.id = `${PANEL_ID}-help`;
     help.hidden = true;
-    const diagnosticHelp = element("p", "ac-cycle-warning", "自动诊断记录学校接口分段耗时、页面与后台事件，出错时随报告保存；不记录令牌、Cookie 或响应正文。");
+    const diagnosticHelp = element("p", "ac-cycle-warning", "自动诊断记录接口耗时、页面与后台事件，出错时随报告保存；业务短说明经过过滤，不记录令牌、Cookie 或完整响应正文。分享前请检查报告。");
     help.append(warning, diagnosticHelp, reportSettings, reportState);
     const toggleHelp = () => {
       help.hidden = !help.hidden;

@@ -2,7 +2,7 @@
 (() => {
   const messages = {
     E_HTTP: "学校接口返回错误 HTTP 状态。", E_NETWORK: "网络请求失败。",
-    E_AUTH: "登录或认证失效。", E_API_TIMEOUT: "学校接口请求超时。",
+    E_AUTH: "认证或访问权限异常。", E_API_TIMEOUT: "学校接口请求超时。",
     E_AUTH_RECOVERED: "学校认证跳转后已核验并接续原循环。",
     E_API_REJECTED: "学校接口返回业务错误。", E_JSON: "响应不是有效 JSON。",
     E_STATUS_FORMAT: "空调状态格式无法识别。", E_TIMER_FORMAT: "定时器格式无法识别。",
@@ -41,6 +41,48 @@
   const identifier = value => typeof value === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(value) ? value : null;
   const pick = (value, choices, fallback = null) => choices.includes(value) ? value : fallback;
   const positive = value => number(value) !== null && value >= 0 ? value : null;
+  const requestSequence = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  const businessCategories = ["authentication", "access-restricted", "balance", "rate-limit", "device-unavailable", "reported-timeout", "service-error", "unknown"];
+  function businessCategory(text, code) {
+    if ([4031, 4032].includes(code) || /(?:login|session|token).{0,24}(?:expired|invalid)|登录.{0,10}(?:失效|过期)/i.test(text)) return "authentication";
+    for (const [category, pattern] of [
+      ["balance", /insufficient.{0,15}(?:balance|credit)|余额不足|欠费/i],
+      ["rate-limit", /too (?:many|frequent)|rate.?limit|频繁|限流/i],
+      ["device-unavailable", /device.{0,20}(?:offline|unavailable|busy)|设备.{0,12}(?:离线|不可用|忙)/i],
+      ["reported-timeout", /tim(?:e[ -]?out|ed out)|超时/i],
+      ["access-restricted", /permission|access denied|forbidden|权限|无权/i],
+      ["service-error", /internal.{0,12}(?:error|exception)|server error|服务.{0,10}(?:异常|错误)/i]
+    ]) if (pattern.test(text)) return category;
+    return "unknown";
+  }
+  function businessError(value) {
+    if (!value || typeof value !== "object") return null;
+    const code = Number.isSafeInteger(value.code) ? value.code : null;
+    const source = pick(value.source, ["meta.message", "data.ac_toggle.Message"]);
+    let text = typeof value.text === "string" ? value.text : null;
+    let omissionReason = pick(value.omissionReason, ["missing", "too-long", "sensitive", "unsafe-format"]);
+    let category = businessCategories.includes(value.category) && text === null ? value.category : businessCategory(text !== null && text.length <= 512 ? text : "", code);
+    if (text === null || !text.trim()) { text = null; omissionReason ??= "missing"; }
+    else if (text.length > 512) { text = null; omissionReason = "too-long"; category = businessCategory("", code); }
+    else if (/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069<>]/u.test(text)) { text = null; omissionReason = "unsafe-format"; }
+    else if (/(?:https?:\/\/|www\.|[\w.+-]+@[\w.-]+\.[a-z]{2,}|\beyJ[A-Za-z0-9_-]+\.|\b\d{1,3}(?:\.\d{1,3}){3}\b|\+?\d[\d ()-]{6,}\d|bearer\s+\S+|\bSECRET\b|(?:token|cookie|session|password|secret|ticket|authorization|密钥|密码)\s*[:=]|(?:user(?:name)?|student(?:[ _-]?id)?|account|学号|姓名|账号)\s*[:=#\w\u4e00-\u9fff])/iu.test(text)) { text = null; omissionReason = "sensitive"; }
+    else { text = [...text.trim().replace(/\s+/gu, " ")].slice(0, 160).join(""); omissionReason = null; category = businessCategory(text, code); }
+    return { code, source, category, text, omissionReason };
+  }
+  function extractBusinessError(value, path, method) {
+    const rejected = value?.meta?.code !== 200;
+    const switchRejected = method === "POST" && path === "/app/prepaid/toggle-status" && value?.data?.ac_toggle?.Message !== "Execution succeeded";
+    if (!rejected && !switchRejected) return null;
+    const source = rejected && typeof value?.meta?.message === "string" && value.meta.message.trim() ? "meta.message"
+      : typeof value?.data?.ac_toggle?.Message === "string" ? "data.ac_toggle.Message" : "meta.message";
+    return businessError({ code: value?.meta?.code, source, text: source === "meta.message" ? value?.meta?.message : value?.data?.ac_toggle?.Message });
+  }
+  function causalRequest(draft, code) {
+    const candidates = (draft.requests ?? []).filter(r => r.errorCode === code);
+    const exact = requestSequence(draft.error?.requestSequence);
+    const matches = exact !== null ? candidates.filter(r => r.sequence === exact) : candidates;
+    return matches.length === 1 ? matches[0] : null;
+  }
   const tabId = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
   const routes = ["home", "login", "callback", "cas", "logout", "school", "other"];
   function pageRoute(value) {
@@ -87,6 +129,7 @@
   function traceEvent(value = {}) {
     return {
       at: positive(value.at), workerId: identifier(value.workerId), operationId: identifier(value.operationId),
+      cancellationRequested: bool(value.cancellationRequested), queueInvalidated: bool(value.queueInvalidated), abortApplied: bool(value.abortApplied),
       tabId: tabId(value.tabId), documentId: identifier(value.documentId), runId: identifier(value.runId),
       source: sources.has(value.source) ? value.source : null, step: pick(value.step, steps),
       ...(value.timingChange ? { timingChange: timingChange(value.timingChange) } : {}),
@@ -139,6 +182,7 @@
       httpStatus: Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599 ? value.httpStatus : null,
       schoolCode: Number.isSafeInteger(value.schoolCode) ? value.schoolCode : null,
       switchAccepted: bool(value.switchAccepted), actualOn: bool(value.actualOn),
+      timerPresent: bool(value.timerPresent), businessError: businessError(value.businessError),
       result: pick(value.result, ["json", "invalid-json", "too-large", "unavailable", "network-error"]),
       // Page-world observations are evidence only, never authority for control.
       evidenceSource: "page-observer", browserRequestId: identifier(value.browserRequestId),
@@ -190,7 +234,7 @@
   function faultBoundary(draft, errorCode) {
     if (!draft.diagnostics) return null;
     const clean = diagnostics(draft.diagnostics);
-    const request = (draft.requests ?? []).filter(item => item.errorCode === errorCode).at(-1);
+    const request = causalRequest(draft, errorCode);
     const operationId = identifier(draft.originalOperationId ?? draft.reportId);
     const matches = request && operationId ? clean.network.filter(item => item.operationId === operationId && item.sequence === request.sequence) : [];
     const network = matches.length === 1 ? matches[0] : null;
@@ -276,6 +320,7 @@
         phase: requestPhases.has(item.phase) ? item.phase : null,
         httpStatus: Number.isInteger(item.httpStatus) && item.httpStatus >= 100 && item.httpStatus <= 599 ? item.httpStatus : null,
         schoolCode: Number.isSafeInteger(item.schoolCode) ? item.schoolCode : null,
+        actualOn: bool(item.actualOn), timerPresent: bool(item.timerPresent), switchAccepted: bool(item.switchAccepted), businessError: businessError(item.businessError),
         elapsedMs: number(item.elapsedMs), dispatched: item.dispatched === true,
         errorCode: Object.hasOwn(messages, item.errorCode) ? item.errorCode : null
       };
@@ -317,9 +362,10 @@
       reportId: identifier(value.reportId), operationId: identifier(value.operationId), runId: identifier(value.runId),
       tabId: tabId(value.tabId), documentId: identifier(value.documentId), desiredOn: bool(value.desiredOn),
       triggerCode: cleanCode(value.triggerCode), triggerSequence: positive(value.triggerSequence),
+      failureRequestSequence: requestSequence(value.failureRequestSequence), triggeredAt: time(value.triggeredAt),
       cancelledAt: time(value.cancelledAt), deadlineAt: time(value.deadlineAt), nextAt: time(value.nextAt), endedAt: time(value.endedAt), revision: positive(value.revision),
       state: pick(value.state, ["pending", "running", "waiting", "completed", "cancelled", "interrupted", "not_run", "expired"]),
-      reason: pick(value.reason, ["two_rounds", "deadline", "user_action", "page_unavailable", "page_changed", "page_closed", "session_ended", "worker_interrupted", "storage_failure", "page_identity_missing"]),
+      reason: pick(value.reason, ["two_rounds", "deadline", "user_action", "page_control", "authentication", "insufficient_evidence", "page_unavailable", "page_changed", "page_closed", "session_ended", "worker_interrupted", "storage_failure", "page_identity_missing"]),
       conclusion: pick(value.conclusion, ["target_observed", "original_observed", "changed", "unknown"]),
       rounds: (Array.isArray(value.rounds) ? value.rounds : []).slice(0, 2).map(r => ({
         operationId: identifier(r.operationId), scheduledAt: time(r.scheduledAt), startedAt: time(r.startedAt), endedAt: time(r.endedAt),
@@ -345,6 +391,69 @@
       switches: (Array.isArray(value.switches) ? value.switches : []).slice(-4).map(s => ({ ...observation(s), statusAfter: observation(s.statusAfter) })),
       queries: (Array.isArray(value.queries) ? value.queries : []).slice(-4).map(q => ({ ...observation(q), role: pick(q.role, ["first-success", "latest"]) })) };
   }
+  function diagnosis(report) {
+    const code = report.error.code, request = causalRequest(report, code);
+    const ref = { operationId: request ? report.operation.originalOperationId ?? report.reportId : report.reportId, requestSequence: requestSequence(request?.sequence), browserRequestId: report.faultBoundary?.browserRequestId ?? null };
+    const facts = [], hypotheses = [], missingEvidence = [];
+    const fact = (text, evidence = ref) => { if (facts.length < 6) facts.push({ confidence: "confirmed", text, evidence: { ...evidence } }); };
+    let category = "unknown", actions = ["在学校页面确认实际状态，再决定是否手动开始。"];
+    if (/^E_BACKGROUND_|E_MESSAGE_SOURCE/.test(code)) {
+      category = "communication"; actions = ["检查扩展是否仍启用，并重新读取状态。", "控制消息没有回执时，先确认实际状态，不要重复提交。"];
+      if (["aircon:getState", "aircon:manualCheck", "aircon:openReportSettings"].includes(report.communication?.messageType)) actions = ["本次是只读消息失败，请重新读取状态；不要清除先前已存在的未知开关警告。"];
+    } else if (["E_API_REJECTED", "E_SWITCH_REJECTED"].includes(code)) {
+      category = "business-rejection"; actions = ["查看学校业务说明，并在学校页面核对实际状态。", "没有确认开关结果时不要重发指令。"];
+    } else if (["E_AUTH", "E_AUTH_RECOVERED"].includes(code)) {
+      category = "authentication-or-access"; actions = ["在学校页面核对登录和访问权限；确认状态后再手动开始。"];
+    } else if (code === "E_HTTP") {
+      category = "http-response"; actions = ["等待接口恢复，或检查学校网页同一接口是否也失败。", "HTTP 状态不能单独确定学校后台或代理链路的根因。"];
+    } else if (code === "E_NETWORK") {
+      category = "connection"; actions = ["检查同一时段学校网页请求和浏览器网络错误。", "开关结果未知时不要重复发送。"];
+    } else if (["E_API_TIMEOUT", "E_OPERATION_TIMEOUT", "E_TIMEOUT", "E_QUERY_RECOVERY_TIMEOUT"].includes(code)) {
+      category = "timeout"; actions = ["按响应头、正文、排队和操作期限区分超时阶段。", "参考后续只读核验；未确认的开关指令不可重发。"];
+    } else if (["E_JSON", "E_STATUS_FORMAT", "E_TIMER_FORMAT"].includes(code)) {
+      category = "response-format"; actions = ["检查响应类型、重定向线索及学校页面是否更新。", "不要以 HTTP 200 代替业务成功。"];
+    } else if (["E_STATUS_CHANGED", "E_STATUS_UNCONFIRMED", "E_NATIVE_TIMER", "E_PAGE_CONTROL"].includes(code)) {
+      category = "state-or-timer"; actions = ["核对学校定时器及手机、其他页面是否操作过空调。", "后续观察不能证明原指令执行成功。"];
+    } else if (/^E_ALARM_/.test(code)) {
+      category = "scheduling"; actions = ["核对闹钟送达、排队时间及电脑是否保持唤醒。", "确认状态后手动开始，不补跳错过的阶段。"];
+    } else if (["E_LOCAL_STORAGE", "E_LOCAL_TIMEOUT", "E_SCHEDULE"].includes(code) || report.source === "cleanup") {
+      category = "control-storage"; actions = ["关键控制记录保存失败时，确认实际状态并重新加载扩展。", "仅报告目录保存失败时，重新授权报告目录；不要据此重复开关。"];
+      if (["keepAlive", "keepAliveSchedule"].includes(report.source)) { category = "auxiliary-storage"; actions = ["核对保活保存或闹钟状态；保活警告本身不表示主循环已经停止。"];
+      }
+    } else if (/^E_PAGE_|^E_SESSION_|^E_COMMAND_UNKNOWN$|^E_CYCLE_INTERRUPTED$|^E_START_INTERRUPTED$|^E_RECOVERY_TIMEOUT$/.test(code)) {
+      category = "page-or-session"; actions = ["核对本标签页的导航、文档和后台事件。", "会话结束后确认实际状态，再手动启用。"];
+    } else if (["E_TIMING_STALE", "E_TIMING_UNAVAILABLE", "E_DURATION", "E_ALREADY_RUNNING", "E_OTHER_TAB"].includes(code)) {
+      category = "request-validation"; actions = ["核对当前循环及输入，本次请求未获应用时不要认为参数已经生效。"];
+    } else if (code === "E_CANCELLED") category = "cancellation";
+    fact(`记录的错误为 ${code}。`);
+    if (request) {
+      fact(`失败关联请求：${request.method ?? "未知方法"} ${request.path ?? "未知接口"}，阶段 ${request.phase ?? "未知"}。`);
+      if (request.httpStatus != null) fact(`收到 HTTP ${request.httpStatus}。`);
+      if (request.schoolCode != null) fact(`学校 JSON 业务码为 ${request.schoolCode}；它与 HTTP 状态分别记录。`);
+      if (request.cancelledBy) fact(`请求取消原因 ${request.cancelledBy}，来源 ${request.cancellationOrigin ?? "未知"}。`);
+    } else if (["E_HTTP", "E_NETWORK", "E_API_TIMEOUT", "E_API_REJECTED", "E_SWITCH_REJECTED", "E_AUTH", "E_JSON", "E_STATUS_FORMAT", "E_TIMER_FORMAT"].includes(code)) missingEvidence.push("未能唯一关联失败请求；不借用其他请求的错误。");
+    if (["E_STATUS_UNCONFIRMED", "E_STATUS_CHANGED"].includes(code)) {
+      const observed = report.requests.filter(r => r.path === "/app/prepaid/ac-status" && typeof r.actualOn === "boolean").at(-1);
+      if (observed) fact(`最后状态读取为 ${observed.actualOn}，目标为 ${typeof report.switchCommand?.desiredOn === "boolean" ? report.switchCommand.desiredOn : report.cycle?.expectedOn ?? "未知"}。`, { ...ref, requestSequence: observed.sequence });
+      else missingEvidence.push("未保存可定位到单次读取的实际状态摘要。");
+    }
+    if (report.switchCommand) fact(`开关指令：已发送=${report.switchCommand.sent}，已确认=${report.switchCommand.confirmed}。`);
+    if (report.businessError) {
+      const b = report.businessError;
+      if (b.text) hypotheses.push({ confidence: "clue", text: `学校返回说明：${b.text}`, evidence: { ...ref } });
+      else missingEvidence.push(`业务说明未保留：${b.omissionReason ?? "未知"}。`);
+      if (b.category === "balance") actions.unshift("在学校页面检查余额及欠费状态。");
+      if (b.category === "rate-limit") actions.unshift("避免连续手动开关，待学校限制解除后再确认状态。");
+      if (b.category === "device-unavailable") actions.unshift("在学校页面检查设备状态，必要时向学校报修。");
+    } else if (category === "business-rejection") missingEvidence.push("该报告没有可用的业务说明。");
+    if (request?.timings?.clockDeltaMs != null && Math.abs(request.timings.clockDeltaMs) > 1000) hypotheses.push({ confidence: "clue", text: "墙上时间与单调时钟差异超过一秒，需核对时钟变化。", evidence: { ...ref } });
+    if (report.postCommandVerification) fact(`后续只读核验：${report.postCommandVerification.state ?? "未知"}，观察结论 ${report.postCommandVerification.conclusion ?? "未知"}。`);
+    else if (report.outcomeUnknown) missingEvidence.push("没有后续主动核验记录；不能据此推断开关结果。");
+    if (report.incidentFollowup) hypotheses.push({ confidence: "clue", text: `被动网页旁证：${report.incidentFollowup.conclusion ?? "unknown"}；仅表示观察线索。`, evidence: { ...ref } });
+    if (!report.diagnostics?.coverage.webRequest) missingEvidence.push("浏览器网络观察不可用或未知。");
+    hypotheses.push({ confidence: "unknown", text: "学校服务器或设备内部原因未被独立验证。", evidence: { ...ref } });
+    return { rulesVersion: 1, category, facts, hypotheses: hypotheses.slice(0, 4), missingEvidence: missingEvidence.slice(0, 6), actions: actions.slice(0, 3), serverInternalCause: "unknown" };
+  }
   function makeReport(draft = {}, environment = {}) {
     const code = Object.hasOwn(messages, draft.error?.code) ? draft.error.code : "E_INTERNAL";
     const at = time(draft.at) ?? Date.now();
@@ -355,7 +464,7 @@
     // Never serialize arbitrary error messages, stacks, bodies, or headers.
     const locationPattern = /\b(?:cycle|background|api-client|errors|reports|report-directory|content|report-settings|diagnostics|history)\.js:\d{1,7}:\d{1,7}\b/g;
     const stackLocations = [...String(draft.error?.stack ?? (Array.isArray(draft.error?.stackLocations) ? draft.error.stackLocations.join("\n") : "")).matchAll(locationPattern)].slice(0, 8).map(match => match[0]);
-    return {
+    const report = {
       schemaVersion: 1, reportId: identifier(draft.reportId) ?? newId(), occurredAt: new Date(at).toISOString(),
       extensionVersion: /^\d{1,5}(\.\d{1,5}){1,3}$/.test(environment.version) ? environment.version : "unknown",
       browserVersion: browserMatch ? `${browserMatch[1]}/${browserMatch[2]}` : "unknown",
@@ -363,7 +472,8 @@
       recovered: bool(draft.recovered),
       snapshotOrigin: draft.snapshotOrigin === "page-cache" ? "page-cache" : "background",
       outcomeUnknown: draft.outcomeUnknown === true,
-      error: { code, message: messages[code], stackLocations },
+      error: { code, message: messages[code], requestSequence: requestSequence(draft.error?.requestSequence), stackLocations },
+      businessError: businessError(causalRequest(draft, code)?.businessError),
       operation: { startedAt, elapsedMs: Math.max(0, at - startedAt), queuedAt: positive(draft.queuedAt), executionStartedAt: positive(draft.executionStartedAt),
         originalOperationId: identifier(draft.originalOperationId),
         queueWaitMs: positive(draft.queuedAt) !== null && positive(draft.executionStartedAt) !== null ? Math.max(0, draft.executionStartedAt - draft.queuedAt) : null },
@@ -391,11 +501,13 @@
         visibility: ["visible", "hidden"].includes(draft.visibility) ? draft.visibility : "unknown"
       }
     };
+    report.diagnosis = diagnosis(report);
+    return report;
   }
   function fileName(report) {
     // The operation start time is stable across page/backend observations.
     const stamp = new Date(report.operation.startedAt).toISOString().replace(/[:.]/g, "-");
     return `aircon-error-${stamp}-${report.reportId}.json`;
   }
-  globalThis.AirconReportFormat = Object.freeze({ makeReport, incidentFollowup, postCommandVerification, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
+  globalThis.AirconReportFormat = Object.freeze({ makeReport, businessError, extractBusinessError, incidentFollowup, postCommandVerification, queryRecovery, requestTrace, mergeDiagnostics, cycle, manualCheck, lifecycle, pageEvidence, pageRoute, pageResponse, traceEvent, resourceTiming, networkRecord, diagnostics, observedPath, newId, identifier, key, isKey, fallbackKey, isFallbackKey, isCacheKey, obsoleteKeys, fileName, limit });
 })();

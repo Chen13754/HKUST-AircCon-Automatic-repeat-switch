@@ -1,5 +1,5 @@
 import { API_BASE } from "./api-config.js";
-import { timerFromSchoolData } from "./cycle.js";
+import { timerFromSchoolData, hasNativeTimer } from "./cycle.js";
 import { bounded, CycleError } from "./errors.js";
 
 export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs = 8000, switchRequestTimeoutMs = 15000, retryGetTimeouts = true, diagnostics, performanceImpl = globalThis.performance, clock = () => Date.now() }) {
@@ -88,7 +88,7 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
         const length = response.headers?.get?.("Content-Length");
         trace.response = { contentType: /json/i.test(type) ? "json" : /html/i.test(type) ? "html" : /text/i.test(type) ? "text" : type ? "other" : "unknown",
           contentLength: length !== null && length !== undefined && /^\d+$/.test(length) ? Number(length) : null, redirected: response.redirected, route };
-        if (response.status === 401 || response.status === 403) throw new CycleError("E_AUTH", `${stage} 登录失效（HTTP ${response.status}），请重新登录。`);
+        if (response.status === 401 || response.status === 403) throw new CycleError("E_AUTH", `${stage} 认证或访问权限异常（HTTP ${response.status}），请在学校页面确认登录与权限。`);
         if (!response.ok) throw new CycleError("E_HTTP", `${stage} 学校服务返回 HTTP ${response.status}。`);
         let result;
         phase("body");
@@ -108,14 +108,20 @@ export function createSchoolApi({ getToken, fetchImpl = fetch, requestTimeoutMs 
         requestSignal.throwIfAborted();
         phase("validation");
         trace.schoolCode = Number.isSafeInteger(result?.meta?.code) ? result.meta.code : null;
+        trace.businessError = globalThis.AirconReportFormat.extractBusinessError(result, path, method);
+        if (path === "/app/prepaid/toggle-status" && typeof result?.data?.ac_toggle?.Message === "string") trace.switchAccepted = result.meta?.code === 200 && result.data.ac_toggle.Message === "Execution succeeded";
         if ([4031, 4032].includes(result?.meta?.code)) throw new CycleError("E_AUTH", `${stage} 登录失效（学校代码 ${result.meta.code}），请重新登录。`);
         if (result?.meta?.code !== 200) throw new CycleError("E_API_REJECTED", `${stage} 操作被拒绝（学校代码 ${result?.meta?.code ?? "缺失"}）。`);
         const value = validate(result.data);
+        if (path === "/app/prepaid/ac-status") trace.actualOn = value;
+        if (path === "/app/prepaid/ac-timer") trace.timerPresent = hasNativeTimer(value);
         phase("complete");
         return value;
       }, { signal, ms: timeoutMs, code: "E_API_TIMEOUT", stage: `${stage} 等待学校响应（包括响应正文）` });
     } catch (error) {
       trace.errorCode = error?.code || "E_INTERNAL";
+      error.businessError = trace.businessError ?? null;
+      if (["E_API_REJECTED", "E_SWITCH_REJECTED"].includes(error.code) && trace.businessError?.text) error.message += ` 学校说明：${trace.businessError.text}`;
       // Bind recovery decisions to this exact failed request, never another trace.
       error.requestSequence = trace.sequence;
       if (signal?.aborted && !trace.cancelledBy) {

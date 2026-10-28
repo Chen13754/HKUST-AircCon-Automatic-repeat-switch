@@ -10,7 +10,7 @@ import { CommandVerification } from "./command-verification.js";
 const HOME_PATH = "/njggt/app/home";
 const pageMessageTypes = new Set(["aircon:initialize", "aircon:getState", "aircon:start", "aircon:updateDurations", "aircon:stop", "aircon:manualCheck", "aircon:openReportSettings"]);
 const reportTabs = new Set();
-const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.21", userAgent: globalThis.navigator?.userAgent };
+const environment = { version: chrome.runtime.getManifest?.().version ?? "1.1.22", userAgent: globalThis.navigator?.userAgent };
 const reporter = new ErrorReporter({
   storage: chrome.storage.local,
   environment,
@@ -398,7 +398,10 @@ try {
   chrome.webRequest.onBeforeRequest.addListener(details => {
     if (details.method !== "POST" || details.frameId !== 0 || details.initiator !== SITE_ORIGIN || !Number.isInteger(details.tabId) || details.tabId < 0) return;
     const path = globalThis.AirconReportFormat.observedPath(details.url);
-    if (["/app/prepaid/toggle-status", "/app/prepaid/ac-timer"].includes(path)) void controller.externalControl(details.tabId, details.documentId).catch(error => capture({ source: "queryRecovery", error }));
+    if (["/app/prepaid/toggle-status", "/app/prepaid/ac-timer"].includes(path)) {
+      if (!details.documentId || !verification.job?.documentId || verification.job.documentId === details.documentId) void verification.cancel(details.tabId, "page_control");
+      void controller.externalControl(details.tabId, details.documentId).catch(error => capture({ source: "queryRecovery", error }));
+    }
   }, { urls: ["https://w5.ab.ust.hk/njggt/api/app/prepaid/*"] });
 } catch { /* The existing webRequest coverage flag reports availability. */ }
 

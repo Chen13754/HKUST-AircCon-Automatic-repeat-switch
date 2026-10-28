@@ -146,6 +146,6 @@ test("heartbeat waking a cold worker cannot exempt or restore a missing control 
   const reply = await h.send("aircon:getState");
   assert.equal(reply.view.run, null);
   assert.match(reply.view.notice.text, /E_ALARM_MISSING/);
-  assert.equal(h.alarms.size, 0);
+  assert.equal([...h.alarms.keys()].filter(name => !name.startsWith("followup:")).length, 0);
   assert.equal(h.requests.some(item => item.method === "POST"), false);
 });

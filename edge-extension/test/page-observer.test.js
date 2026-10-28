@@ -41,7 +41,7 @@ function harness({ bridgeFirst = true, fetchImpl } = {}) {
   const main = vm.createContext({ ...globals, XMLHttpRequest: XHR });
   const connect = () => { vm.runInContext(read("report-format") + "\n" + read("page-bridge"), bridge); };
   if (bridgeFirst) connect();
-  vm.runInContext(read("page-observer"), main);
+  vm.runInContext(read("report-format") + "\n" + read("page-observer"), main);
   return { XHR, window, messages, events, bridge, connect };
 }
 

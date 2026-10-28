@@ -703,7 +703,7 @@ test("idle timer does no DOM work; mutation observer handles mounting", async ()
   assert.equal(h.panel.isConnected, true);
 });
 
-test("lost background response is cached locally with stale state explicitly marked unknown", async () => {
+test("lost read-only background response preserves cached state without inventing a switch outcome", async () => {
   let fail = false;
   const h = harness(() => {
     if (fail) throw new Error("SECRET must not be stored");
@@ -716,10 +716,20 @@ test("lost background response is cached locally with stale state explicitly mar
   const records = Object.values(h.reports);
   assert.equal(records.length, 1);
   assert.equal(records[0].report.snapshotOrigin, "page-cache");
-  assert.equal(records[0].report.outcomeUnknown, true);
+  assert.equal(records[0].report.outcomeUnknown, false);
   assert.equal(records[0].report.error.code, "E_BACKGROUND_UNAVAILABLE");
   assert.equal(records[0].report.cycle.phase, "on");
   assert.equal(JSON.stringify(records).includes("SECRET"), false);
+});
+test("read-only communication failure does not clear a previously unknown switch warning", async () => {
+  let fail = false;
+  const h = harness(() => {
+    if (fail) throw new Error("disconnected");
+    return { ok: true, view: { ...idle, notice: { kind: "error", text: "结果未确认", outcomeUnknown: true } } };
+  });
+  await flush(); fail = true; h.changed(); await flush();
+  assert.equal(h.button("start").disabled, true); assert.equal(h.button("stop").disabled, false);
+  assert.equal(Object.values(h.reports)[0].report.outcomeUnknown, true);
 });
 
 test("backend-reported fault does not create a duplicate page report", async () => {
@@ -731,7 +741,7 @@ test("backend-reported fault does not create a duplicate page report", async () 
   assert.equal(Object.keys(h.reports).length, 0);
 });
 
-test("invalid state reply preserves the last valid cycle view and records unknown outcome", async () => {
+test("invalid state reply preserves the last valid cycle view and reports a read failure", async () => {
   const calls = [];
   const h = harness(message => {
     calls.push(message.type);
@@ -747,7 +757,7 @@ test("invalid state reply preserves the last valid cycle view and records unknow
   const records = Object.values(h.reports);
   assert.equal(records.length, 1);
   assert.equal(records[0].report.cycle.phase, "on");
-  assert.equal(records[0].report.outcomeUnknown, true);
+  assert.equal(records[0].report.outcomeUnknown, false);
   assert.equal(records[0].report.communication.tabIsHome, true);
   assert.deepEqual(calls, ["aircon:initialize", "aircon:getState"]);
 });
@@ -1130,7 +1140,7 @@ test("manual-check communication fallback caches its trigger without retrying", 
   await flush();
   const report = Object.values(h.reports)[0].report;
   assert.equal(report.error.code, "E_BACKGROUND_EMPTY_REPLY");
-  assert.equal(report.extensionVersion, "1.1.21");
+  assert.equal(report.extensionVersion, "1.1.22");
   assert.deepEqual(JSON.parse(JSON.stringify(report.manualCheck)), { trigger: "click", observedOn: true });
   assert.deepEqual(calls, ["aircon:initialize", "aircon:manualCheck"]);
 });

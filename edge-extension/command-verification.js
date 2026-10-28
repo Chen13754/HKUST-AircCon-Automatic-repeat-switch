@@ -5,16 +5,23 @@ import "./report-format.js";
 const format = globalThis.AirconReportFormat;
 const ACTIVE = new Set(["pending", "running", "waiting"]);
 const TERMINAL_PAGE_ERRORS = new Set(["E_AUTH", "E_PAGE_CLOSED", "E_PAGE_RELOADING", "E_PAGE_UNAVAILABLE"]);
+const VERIFY_ERRORS = new Set(["E_API_TIMEOUT", "E_OPERATION_TIMEOUT", "E_API_REJECTED", "E_SWITCH_REJECTED", "E_NETWORK", "E_HTTP", "E_JSON", "E_STATUS_FORMAT", "E_STATUS_UNCONFIRMED"]);
 export const VERIFICATION_KEY = "postCommandVerificationJob";
 
 export function verificationCandidate(draft) {
   if (!draft?.command?.sent || draft.command.confirmed || typeof draft.command.desiredOn !== "boolean") return null;
-  if (!["E_API_TIMEOUT", "E_OPERATION_TIMEOUT"].includes(draft.error?.code)) return null;
-  const matches = (draft.requests ?? []).filter(r => r.sequence === draft.error.requestSequence
-    && r.path === "/app/prepaid/toggle-status" && r.method === "POST" && r.dispatched
-    && r.errorCode === draft.error.code && Number.isFinite(r.cancelledAt)
-    && r.cancelledBy === draft.error.code && ["headers", "body"].includes(r.phase));
-  return matches.length === 1 ? matches[0] : null;
+  if (!VERIFY_ERRORS.has(draft.error?.code)) return null;
+  const posts = (draft.requests ?? []).filter(r => r.path === "/app/prepaid/toggle-status" && r.method === "POST" && r.dispatched);
+  if (posts.length !== 1) return null;
+  if (posts[0].response?.route === "login") return null;
+  const post = posts[0], failed = (draft.requests ?? []).filter(r => r.sequence === draft.error.requestSequence && r.errorCode === draft.error.code);
+  if (failed.length === 1 && failed[0] === post) {
+    if (["E_API_TIMEOUT", "E_OPERATION_TIMEOUT"].includes(draft.error.code)
+      && (!Number.isFinite(post.cancelledAt) || post.cancelledBy !== draft.error.code || !["headers", "body"].includes(post.phase))) return null;
+    return post;
+  }
+  if (post.errorCode || post.phase !== "complete" || post.schoolCode !== 200 || post.switchAccepted === false) return null;
+  return draft.error.code === "E_STATUS_UNCONFIRMED" || failed.length === 1 && failed[0].method === "GET" && failed[0].path === "/app/prepaid/ac-status" ? post : null;
 }
 
 export function verificationConclusion(rounds, desiredOn) {
@@ -84,7 +91,13 @@ export class CommandVerification {
   }
   async start(draft, cleanupFailure = null) {
     const request = verificationCandidate(draft);
-    if (!request) return;
+    if (!draft?.command?.sent || draft.command.confirmed) return;
+    const failure = draft.requests?.find(r => r.sequence === draft.error?.requestSequence && r.errorCode === draft.error?.code);
+    const anchor = ["E_API_TIMEOUT", "E_OPERATION_TIMEOUT"].includes(draft.error?.code) && Number.isFinite(failure?.cancelledAt) ? failure.cancelledAt : draft.at;
+    const skipped = !request ? draft.error?.code === "E_AUTH" || failure?.response?.route === "login" ? "authentication" : draft.error?.code === "E_CANCELLED" ? "user_action"
+      : ["E_PAGE_RELOADING", "E_PAGE_CLOSED", "E_PAGE_CONTROL"].includes(draft.error?.code) ? "page_changed"
+      : ["E_LOCAL_STORAGE", "E_LOCAL_TIMEOUT"].includes(draft.error?.code) ? "storage_failure" : "insufficient_evidence"
+      : !Number.isFinite(anchor) ? "insufficient_evidence" : null;
     const epoch = draft.verificationGeneration;
     try {
       await this.ready();
@@ -93,9 +106,14 @@ export class CommandVerification {
         const missingIdentity = !draft.run?.documentId;
         const candidate = { reportId: draft.reportId, operationId: draft.reportId, runId: draft.run?.id,
           tabId: draft.run?.tabId, documentId: draft.run?.documentId, desiredOn: draft.command.desiredOn,
-          triggerCode: draft.error.code, triggerSequence: request.sequence, cancelledAt: request.cancelledAt,
-          deadlineAt: request.cancelledAt + 45000, nextAt: request.cancelledAt + 30000,
+          triggerCode: draft.error?.code, triggerSequence: request?.sequence, failureRequestSequence: failure?.sequence,
+          cancelledAt: failure?.cancelledAt ?? null, triggeredAt: Number.isFinite(anchor) ? anchor : null,
+          deadlineAt: Number.isFinite(anchor) ? anchor + 45000 : null, nextAt: Number.isFinite(anchor) ? anchor + 30000 : null,
           state: "pending", rounds: [], revision: 0 };
+        if (skipped) {
+          await this.local(() => this.updateReport(candidate.reportId, { ...candidate, revision: 1, state: "not_run", reason: skipped, endedAt: this.clock(), conclusion: "unknown" }));
+          return;
+        }
         if (cancelled) {
           await this.local(() => this.updateReport(candidate.reportId, { ...candidate, revision: 1, state: "not_run", reason: this.cancellationFor(candidate.tabId).reason, endedAt: this.clock(), conclusion: "unknown" }));
           return;
@@ -124,7 +142,7 @@ export class CommandVerification {
       if (!await this.local(() => this.canVerify(job))) { await this.finish("cancelled", "user_action"); return; }
       context = { reportId: format.newId(), source: "postCommandVerification", readOnlyVerification: true,
         originalOperationId: job.operationId, run: { id: job.runId, tabId: job.tabId, documentId: job.documentId }, requests: [] };
-      job.rounds.push({ operationId: context.reportId, scheduledAt: index ? job.nextAt : job.cancelledAt, startedAt: this.clock() });
+      job.rounds.push({ operationId: context.reportId, scheduledAt: index ? job.nextAt : job.triggeredAt ?? job.cancelledAt, startedAt: this.clock() });
       job.state = "running";
       await this.save(); // Durable claim precedes all network I/O.
       if (epoch !== this.generationFor(job.tabId)) return;
@@ -158,7 +176,8 @@ export class CommandVerification {
     await this.enqueue(async () => {
       this.active = null;
       if (this.job !== job || epoch !== this.generationFor(job.tabId) || job.state !== "running") return;
-      if ([round.actualOnError, round.timerPresentError].some(code => TERMINAL_PAGE_ERRORS.has(code))) await this.finish("cancelled", "page_unavailable");
+      if (context.requests.some(r => r.errorCode === "E_AUTH" || r.response?.route === "login")) await this.finish("cancelled", "authentication");
+      else if ([round.actualOnError, round.timerPresentError].some(code => TERMINAL_PAGE_ERRORS.has(code))) await this.finish("cancelled", "page_unavailable");
       else if (this.clock() >= job.deadlineAt) await this.finish("expired", "deadline");
       else if (index === 1) await this.finish("completed", "two_rounds");
       else {

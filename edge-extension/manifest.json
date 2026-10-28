@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HKUST 空调自动循环",
-  "version": "1.1.21",
+  "version": "1.1.22",
   "description": "在 HKUST 学校空调页面按设定时长循环开关，支持运行中调整与本地错误报告。需保持电脑唤醒和页面打开。非官方插件。",
   "homepage_url": "https://github.com/Chen13754/HKUST-AircCon-Automatic-repeat-switch",
   "permissions": ["alarms", "storage", "webRequest", "webNavigation"],
@@ -19,7 +19,7 @@
     },
     {
       "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
-      "js": ["page-observer.js"],
+      "js": ["report-format.js", "page-observer.js"],
       "world": "MAIN",
       "run_at": "document_start"
     },

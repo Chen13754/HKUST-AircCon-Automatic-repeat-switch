@@ -1,5 +1,5 @@
-// MAIN world, document_start. Observe only numeric business codes; never send
-// tokens, account data, headers, response text or URL query strings to the bridge.
+// MAIN world, document_start. Observe codes, typed outcomes and filtered short
+// business explanations; never send raw bodies, credentials or headers.
 // Nothing from this observer is used to authorize a control operation.
 (() => {
   const EVENT = "aircon-diagnostic-v2", CONNECT = "aircon-diagnostic-connect-v2";
@@ -28,6 +28,7 @@
   function summarize(record, status, value, result = "json") {
     emit({ kind: "response", response: { ...record, endedAt: Date.now(), httpStatus: status,
       schoolCode: Number.isSafeInteger(value?.meta?.code) ? value.meta.code : null, result,
+      businessError: globalThis.AirconReportFormat.extractBusinessError(value, record.path, record.method),
       switchAccepted: record.method === "POST" && record.path === "/app/prepaid/toggle-status" && typeof value?.data?.ac_toggle?.Message === "string"
         ? value.meta?.code === 200 && value.data.ac_toggle.Message === "Execution succeeded" : null,
       actualOn: record.method === "GET" && record.path === "/app/prepaid/ac-status" && typeof value?.data?.ac_status?.DisconnectRelay === "boolean" ? value.data.ac_status.DisconnectRelay : null } });

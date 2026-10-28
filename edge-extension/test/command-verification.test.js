@@ -26,6 +26,34 @@ function harness(overrides = {}) {
 async function first(h, value = draft()) { await h.verifier.start(value); await h.verifier.work; }
 async function second(h, at = 130000) { h.now = at; await h.verifier.onAlarm("incident", 130000); await h.verifier.work; }
 
+for (const code of ["E_API_REJECTED", "E_SWITCH_REJECTED", "E_NETWORK", "E_HTTP", "E_JSON"]) test(`post-dispatch ${code} reuses two read-only rounds with failure time anchor`, async () => {
+  const h = harness(), d = draft(code); d.at = 100000;
+  Object.assign(d.requests[0], { phase: code === "E_NETWORK" ? "headers" : "validation", cancelledAt: null, cancelledBy: null });
+  assert.equal(verificationCandidate(d), d.requests[0]); await first(h, d); await second(h);
+  assert.equal(h.reads.length, 4); assert.equal(h.verifier.job.deadlineAt, 145000); assert.equal(h.verifier.job.triggeredAt, 100000);
+  assert.equal(h.verifier.job.state, "completed");
+});
+for (const code of ["E_API_TIMEOUT", "E_HTTP", "E_JSON", "E_STATUS_FORMAT", "E_STATUS_UNCONFIRMED"]) test(`successful POST followed by ${code} verifies without another POST`, async () => {
+  const h = harness(), d = draft(code); d.at = 100000;
+  Object.assign(d.requests[0], { errorCode: null, phase: "complete", schoolCode: 200, switchAccepted: true, cancelledAt: null, cancelledBy: null });
+  d.error.requestSequence = 4;
+  if (code !== "E_STATUS_UNCONFIRMED") d.requests.push({ sequence: 4, method: "GET", path: "/app/prepaid/ac-status", errorCode: code, cancelledAt: code === "E_API_TIMEOUT" ? 100000 : null });
+  assert.equal(verificationCandidate(d), d.requests[0]); await first(h, d); await second(h);
+  assert.equal(h.reads.length, 4); assert.equal(h.verifier.job.triggerSequence, 3);
+});
+for (const [code, reason] of [["E_AUTH", "authentication"], ["E_CANCELLED", "user_action"], ["E_PAGE_RELOADING", "page_changed"], ["E_LOCAL_STORAGE", "storage_failure"]]) test(`${code} records why post-dispatch queries were not started`, async () => {
+  const h = harness(), d = draft(code); d.at = 100000; await first(h, d);
+  assert.equal(h.reads.length, 0); assert.equal(h.snapshots.at(-1).state, "not_run"); assert.equal(h.snapshots.at(-1).reason, reason);
+});
+test("new native page control cancels an already waiting diagnostic", async () => {
+  const h = harness(); await first(h); await h.verifier.cancel(8, "page_control"); await second(h);
+  assert.equal(h.reads.length, 2); assert.equal(h.verifier.job.reason, "page_control");
+});
+test("a known login redirect records why no active reads are allowed", async () => {
+  const h = harness(), d = draft("E_JSON"); d.at = 100000; d.requests[0].response = { route: "login" };
+  await first(h, d); assert.equal(h.reads.length, 0); assert.equal(h.snapshots.at(-1).reason, "authentication");
+});
+
 for (const code of ["E_API_TIMEOUT", "E_OPERATION_TIMEOUT"]) for (const phase of ["headers", "body"]) {
   test(`only exact dispatched POST ${code} in ${phase} qualifies`, () => {
     const d = draft(code); d.requests[0].phase = phase;

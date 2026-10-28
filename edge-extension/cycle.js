@@ -323,7 +323,10 @@ export class CycleController {
   }
 
   cancel(tabId, reason = new CycleError("E_CANCELLED", "操作已取消；已发送的指令无法撤回，请自行确认空调状态。")) {
-    this.trace(this.active?.diagnostic, { component: "operation", step: "cancel", outcome: "cancelled", code: reason.code });
+    const active = this.active?.tabId === tabId ? this.active : null;
+    const abortApplied = Boolean(active && !active.controller.signal.aborted);
+    this.trace(active?.diagnostic, { tabId, component: "operation", step: "cancel", outcome: "cancelled", code: reason.code,
+      cancellationRequested: true, queueInvalidated: true, abortApplied });
     this.revisions.set(tabId, (this.revisions.get(tabId) || 0) + 1);
     if (this.active?.tabId === tabId) this.active.controller.abort(reason);
   }
@@ -904,7 +907,7 @@ export class CycleController {
     const draft = context?.error && !cancellation ? { ...context, run, at: notice.at, outcomeUnknown: notice.outcomeUnknown } : null;
     let historyError;
     try { await this.history.finish(run, notice, draft); }
-    catch (error) { historyError = error; this.recordError(error, this.diagnostic("cleanup"), run); }
+    catch (error) { historyError = error; this.recordError(error, this.diagnostic("cleanup", { originalOperationId: context?.reportId }), run); }
     this.loadingTabs.delete(run.tabId);
     const results = await Promise.allSettled([
       this.alarm.clear(run.id), this.store.clearRun(),
@@ -916,7 +919,7 @@ export class CycleController {
       this.writeFault ??= new CycleError("E_LOCAL_STORAGE", "循环清理失败，已禁止后续空调指令；请重新加载扩展并确认空调状态。");
       notice.kind = "error";
       notice.text = describeError(this.writeFault);
-      const cleanup = this.diagnostic("cleanup", { run, command: context?.command });
+      const cleanup = this.diagnostic("cleanup", { run, command: context?.command, originalOperationId: context?.reportId });
       this.recordError(this.writeFault, cleanup, run);
       if (!historyError) await this.history.finish(run, notice, { ...cleanup, at: notice.at, outcomeUnknown: notice.outcomeUnknown }).catch(() => {});
     }

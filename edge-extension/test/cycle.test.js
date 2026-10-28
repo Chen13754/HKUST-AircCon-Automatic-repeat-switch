@@ -74,6 +74,15 @@ function harness(options = {}) {
 
 const schoolReply = data => ({ ok: true, status: 200, json: async () => ({ meta: { code: 200 }, data }) });
 
+test("secondary checkpoint failure links to the original operation without replacing its business rejection", async () => {
+  const reports = [], h = harness({ report: d => { reports.push(d); return d.reportId; },
+    history: { get: async () => null, save: async () => {}, finish: async () => { throw new Error("simulated storage failure"); } } });
+  h.controller.api.setStatus = async () => { throw new CycleError("E_API_REJECTED", "simulated rejection"); };
+  await assert.rejects(h.controller.start(8, 1, 1));
+  assert.equal(reports[0].error.code, "E_API_REJECTED");
+  assert.ok(reports.some(d => d.source === "cleanup" && d.originalOperationId === reports[0].reportId));
+});
+
 for (const source of ["start", "tick"]) test(`${source} calls diagnostic hook only after unknown POST has stopped and persisted the fault`, async () => {
   const order = [], reports = [];
   const h = harness({ history: { get: async () => null, save: async () => {}, finish: async () => { order.push("persist"); } }, report: d => { reports.push(d); return d.reportId; } });
